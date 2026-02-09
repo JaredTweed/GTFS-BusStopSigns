@@ -45,6 +45,7 @@ let stops = [];          // [{stop_id, stop_name, stop_lat, stop_lon, stop_code?
 let routesById = new Map(); // route_id -> {route_short_name, route_long_name, route_color, route_text_color}
 let tripsById = new Map();  // trip_id -> {route_id, direction_id, trip_headsign, shape_id}
 let stopToTrips = new Map();// stop_id -> Set(trip_id)
+let stopTripTimes = new Map();// stop_id -> Map(trip_id -> departure seconds)
 let shapesById = new Map(); // shape_id -> [[lat, lon], ...]
 
 // Selected stop
@@ -70,6 +71,88 @@ function niceInt(x) {
 function safeParseFloat(x) {
   const v = Number.parseFloat(x);
   return Number.isFinite(v) ? v : null;
+}
+
+function parseGtfsTimeToSeconds(v) {
+  if (v == null) return null;
+  const raw = String(v).trim();
+  if (!raw) return null;
+  const m = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const h = Number.parseInt(m[1], 10);
+  const mi = Number.parseInt(m[2], 10);
+  const s = Number.parseInt(m[3] || "0", 10);
+  if (!Number.isFinite(h) || !Number.isFinite(mi) || !Number.isFinite(s)) return null;
+  if (mi < 0 || mi > 59 || s < 0 || s > 59 || h < 0) return null;
+  return (h * 3600) + (mi * 60) + s;
+}
+
+function formatClockTimeFromSeconds(sec) {
+  if (!Number.isFinite(sec)) return "";
+  const raw = Math.floor(sec);
+  const day = 24 * 3600;
+  const dayOffset = raw >= 0 ? Math.floor(raw / day) : 0;
+  const t = ((raw % day) + day) % day;
+  const h24 = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const h12 = ((h24 + 11) % 12) + 1;
+  const ampm = h24 >= 12 ? "p" : "a";
+  const base = `${h12}:${String(m).padStart(2, "0")}${ampm}`;
+  return dayOffset > 0 ? `${base}+${dayOffset}` : base;
+}
+
+function summarizeFrequencyWindows(timesSec) {
+  const sorted = (timesSec || [])
+    .filter((x) => Number.isFinite(x))
+    .sort((a, b) => a - b);
+  if (sorted.length < 2) return [];
+
+  const windows = [];
+  let startIdx = 0;
+  let gaps = [];
+
+  const flushWindow = (endIdxExclusive) => {
+    if (endIdxExclusive - startIdx < 2) return;
+    const valid = gaps.filter((g) => g >= 2 && g <= 180);
+    if (valid.length === 0) return;
+    const minGap = Math.round(Math.min(...valid));
+    const maxGap = Math.round(Math.max(...valid));
+    const from = formatClockTimeFromSeconds(sorted[startIdx]);
+    const to = formatClockTimeFromSeconds(sorted[endIdxExclusive - 1]);
+    windows.push({
+      from,
+      to,
+      minGap,
+      maxGap,
+    });
+  };
+
+  for (let i = 1; i < sorted.length; i += 1) {
+    const gapMin = (sorted[i] - sorted[i - 1]) / 60;
+    const mid = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : null;
+    const gapBreak = gapMin > 120;
+    const shiftBreak = mid != null && (gapMin > (mid * 2) || gapMin < (mid / 2));
+    if (gapBreak || shiftBreak) {
+      flushWindow(i);
+      startIdx = i;
+      gaps = [];
+      continue;
+    }
+    gaps.push(gapMin);
+  }
+  flushWindow(sorted.length);
+
+  return windows;
+}
+
+function buildActiveHoursMetaText(directionId, timesSec = []) {
+  const dirLabel = `dir ${directionId ?? "?"}`;
+  const sorted = (timesSec || [])
+    .filter((x) => Number.isFinite(x))
+    .sort((a, b) => a - b);
+  if (sorted.length === 0) return `${dirLabel} • active hours unavailable`;
+  if (sorted.length === 1) return `${dirLabel} • active: ${formatClockTimeFromSeconds(sorted[0])}`;
+  return `${dirLabel} • active: ${formatClockTimeFromSeconds(sorted[0])}-${formatClockTimeFromSeconds(sorted[sorted.length - 1])}`;
 }
 
 function parseCSVFromZip(zip, filename, { stepRow, complete } = {}) {
@@ -1668,8 +1751,9 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
 function computeRouteSummaryForStop(stop, directionFilter) {
   const tripSet = stopToTrips.get(stop.stop_id);
   if (!tripSet || tripSet.size === 0) return [];
+  const tripTimesForStop = stopTripTimes.get(stop.stop_id) || new Map();
 
-  // key -> {route_id, direction_id, count, shapeCounts, headsignCounts}
+  // key -> {route_id, direction_id, count, shapeCounts, headsignCounts, times}
   const agg = new Map();
 
   for (const tripId of tripSet) {
@@ -1690,6 +1774,7 @@ function computeRouteSummaryForStop(stop, directionFilter) {
       count: 0,
       shapeCounts: new Map(),
       headsignCounts: new Map(),
+      times: [],
     };
     cur.count += 1;
     if (t.shape_id) {
@@ -1700,6 +1785,8 @@ function computeRouteSummaryForStop(stop, directionFilter) {
       const prev = cur.headsignCounts.get(headsign) || 0;
       cur.headsignCounts.set(headsign, prev + 1);
     }
+    const depSec = tripTimesForStop.get(tripId);
+    if (depSec != null) cur.times.push(depSec);
     agg.set(k, cur);
   }
 
@@ -1723,6 +1810,7 @@ function computeRouteSummaryForStop(stop, directionFilter) {
         headsignMax = n;
       }
     }
+    const windows = summarizeFrequencyWindows(x.times);
 
     return {
       route_id: x.route_id,
@@ -1732,6 +1820,8 @@ function computeRouteSummaryForStop(stop, directionFilter) {
       shape_id: shapeId,
       route_short_name: shortName,
       route_color: normalizeColor(r?.route_color, "#3b82f6"),
+      frequency_windows: windows,
+      frequency_meta: buildActiveHoursMetaText(x.direction_id, x.times),
     };
   });
 
@@ -1863,10 +1953,10 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken }
     ctx.fillText(dest.slice(0, 40), pad + (pillR*2) + 18, y + 10);
 
     // Secondary label (direction id + popularity proxy)
-    const meta = `dir ${it.direction_id ?? "?"} • patterns: ${it.count}`;
+    const meta = it.frequency_meta || buildActiveHoursMetaText(it.direction_id);
     ctx.fillStyle = "#666666";
     ctx.font = "600 18px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-    ctx.fillText(meta, pad + (pillR*2) + 18, y + 40);
+    ctx.fillText(meta.slice(0, 78), pad + (pillR*2) + 18, y + 40);
 
     y += rowH;
     if (y > H - 120) break;
@@ -2005,11 +2095,11 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
       const dest = (it.headsign || r?.route_long_name || r?.route_short_name || "").toString().trim().slice(0, 40);
       const bg = normalizeColor(r?.route_color, it.route_color || "#3b82f6");
       const fg = r?.route_text_color ? normalizeColor(r.route_text_color, pickTextColor(bg)) : pickTextColor(bg);
-      const meta = `dir ${it.direction_id ?? "?"} • patterns: ${it.count}`;
+      const meta = it.frequency_meta || buildActiveHoursMetaText(it.direction_id);
       routesSvg.push(`<circle cx="${pad + pillR}" cy="${y}" r="${pillR}" fill="${bg}" />`);
       routesSvg.push(`<text x="${pad + pillR}" y="${y + 10}" text-anchor="middle" fill="${fg}" font-size="30" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(routeNum)}</text>`);
       routesSvg.push(`<text x="${pad + (pillR * 2) + 18}" y="${y + 10}" fill="#111111" font-size="28" font-weight="800" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(dest)}</text>`);
-      routesSvg.push(`<text x="${pad + (pillR * 2) + 18}" y="${y + 40}" fill="#666666" font-size="18" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(meta)}</text>`);
+      routesSvg.push(`<text x="${pad + (pillR * 2) + 18}" y="${y + 40}" fill="#666666" font-size="18" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(meta.slice(0, 78))}</text>`);
       y += rowH;
       if (y > H - 120) break;
     }
@@ -2175,6 +2265,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
   routesById = new Map();
   tripsById = new Map();
   stopToTrips = new Map();
+  stopTripTimes = new Map();
   shapesById = new Map();
   selectedStop = null;
   selectedStopRouteSummary = null;
@@ -2249,6 +2340,17 @@ async function boot({ zipUrl, zipFile, zipName }) {
         let set = stopToTrips.get(stopId);
         if (!set) { set = new Set(); stopToTrips.set(stopId, set); }
         set.add(tripId);
+
+        const depSec = parseGtfsTimeToSeconds(row.departure_time) ?? parseGtfsTimeToSeconds(row.arrival_time);
+        if (depSec != null) {
+          let byTrip = stopTripTimes.get(stopId);
+          if (!byTrip) {
+            byTrip = new Map();
+            stopTripTimes.set(stopId, byTrip);
+          }
+          const prev = byTrip.get(tripId);
+          if (prev == null || depSec < prev) byTrip.set(tripId, depSec);
+        }
 
         // Update progress every ~50k lines (rough)
         if (rowCount % 50000 === 0) {
