@@ -33,6 +33,7 @@ const ui = {
   maxRoutes: el("maxRoutes"),
   downloadBtn: el("downloadBtn"),
   copyBtn: el("copyBtn"),
+  downloadSvgBtn: el("downloadSvgBtn"),
   signCanvas: el("signCanvas"),
   modalRouteMap: el("modalRouteMap"),
   modalRouteMapHint: el("modalRouteMapHint"),
@@ -251,12 +252,7 @@ function buildRouteSegmentsForStop(stop, items, maxRoutes) {
 }
 
 function assignParallelOffsets(segments) {
-  const arr = segments.slice().sort((a, b) => (a.route_short_name || "").localeCompare(b.route_short_name || ""));
-  const n = arr.length;
-  for (let i = 0; i < n; i += 1) {
-    // Center offsets around 0: e.g. n=3 -> -6,0,+6
-    arr[i].offsetPx = (i - ((n - 1) / 2)) * 6;
-  }
+  for (const seg of segments) seg.offsetPx = 0;
 }
 
 function offsetPolylinePixels(pixelPoints, offsetPx) {
@@ -292,6 +288,170 @@ function offsetLatLonPolylineForMap(mapObj, points, offsetPx) {
     const ll = mapObj.unproject(L.point(p.x, p.y), zoom);
     return [ll.lat, ll.lng];
   });
+}
+
+function snapCoord(v) {
+  return Math.round(v * 5000) / 5000;
+}
+
+function edgeKey(a, b) {
+  const ka = `${snapCoord(a[0])},${snapCoord(a[1])}`;
+  const kb = `${snapCoord(b[0])},${snapCoord(b[1])}`;
+  return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+}
+
+function buildSharedEdges(segments) {
+  const segmentByRouteId = new Map();
+  for (const seg of segments) segmentByRouteId.set(seg.route_id, seg);
+
+  const byEdge = new Map();
+  for (const seg of segments) {
+    for (let i = 1; i < seg.points.length; i += 1) {
+      const a = seg.points[i - 1];
+      const b = seg.points[i];
+      const key = edgeKey(a, b);
+      let e = byEdge.get(key);
+      if (!e) {
+        e = { a, b, routeIds: new Set(), colorByRoute: new Map(), firstEdgeIdxByRoute: new Map() };
+        byEdge.set(key, e);
+      }
+      e.routeIds.add(seg.route_id);
+      e.colorByRoute.set(seg.route_id, seg.lineColor);
+      if (!e.firstEdgeIdxByRoute.has(seg.route_id)) e.firstEdgeIdxByRoute.set(seg.route_id, i - 1);
+    }
+  }
+  const shared = Array.from(byEdge.values()).filter((e) => e.routeIds.size > 1);
+
+  // Keep lane order stable across an entire shared corridor (same route set),
+  // so colors don't swap sides while routes are still overlapped.
+  const groups = new Map(); // route-set key -> edge[]
+  for (const e of shared) {
+    const key = Array.from(e.routeIds).sort().join("|");
+    let arr = groups.get(key);
+    if (!arr) {
+      arr = [];
+      groups.set(key, arr);
+    }
+    arr.push(e);
+  }
+
+  for (const [routeSetKey, edges] of groups.entries()) {
+    const routeIds = routeSetKey.split("|");
+    const ref = edges[0];
+    const rax = ref.a[1];
+    const ray = ref.a[0];
+    const rbx = ref.b[1];
+    const rby = ref.b[0];
+    const rdx = rbx - rax;
+    const rdy = rby - ray;
+    const rlen = Math.hypot(rdx, rdy) || 1;
+    const nx = -rdy / rlen;
+    const ny = rdx / rlen;
+
+    let centerX = 0;
+    let centerY = 0;
+    let centerN = 0;
+    for (const e of edges) {
+      centerX += (e.a[1] + e.b[1]) / 2;
+      centerY += (e.a[0] + e.b[0]) / 2;
+      centerN += 1;
+    }
+    centerX /= Math.max(1, centerN);
+    centerY /= Math.max(1, centerN);
+
+    const scored = [];
+    for (const rid of routeIds) {
+      const seg = segmentByRouteId.get(rid);
+      if (!seg) continue;
+
+      let total = 0;
+      let n = 0;
+      for (const e of edges) {
+        const idx = e.firstEdgeIdxByRoute.get(rid);
+        if (idx == null) continue;
+        const end = seg.points[seg.points.length - 1] || e.b;
+        const near = seg.points[Math.min(seg.points.length - 1, idx + 4)] || end;
+        const endX = end[1], endY = end[0];
+        const nearX = near[1], nearY = near[0];
+        const endScore = ((endX - centerX) * nx) + ((endY - centerY) * ny);
+        const nearScore = ((nearX - centerX) * nx) + ((nearY - centerY) * ny);
+        total += (0.65 * nearScore) + (0.35 * endScore);
+        n += 1;
+      }
+      scored.push({ rid, score: n > 0 ? total / n : 0 });
+    }
+
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return String(a.rid).localeCompare(String(b.rid));
+    });
+    const orderedRouteIds = scored.map((x) => x.rid);
+    for (const e of edges) e.orderedRouteIds = orderedRouteIds;
+  }
+
+  return shared;
+}
+
+function drawStripedLineOnCanvas(ctx, x1, y1, x2, y2, colors, width) {
+  if (!colors || colors.length === 0) return;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) return;
+  if (colors.length === 1) {
+    ctx.strokeStyle = colors[0];
+    ctx.lineWidth = width;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    return;
+  }
+
+  const nx = -dy / len;
+  const ny = dx / len;
+  const laneStep = Math.max(2, width / colors.length);
+  const laneWidth = Math.max(2, laneStep - 0.4);
+
+  for (let i = 0; i < colors.length; i += 1) {
+    const off = (i - ((colors.length - 1) / 2)) * laneStep;
+    const ox = nx * off;
+    const oy = ny * off;
+    ctx.strokeStyle = colors[i];
+    ctx.lineWidth = laneWidth;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(x1 + ox, y1 + oy);
+    ctx.lineTo(x2 + ox, y2 + oy);
+    ctx.stroke();
+  }
+}
+
+function drawStripedLineOnMap(layer, mapObj, a, b, colors, width) {
+  if (!colors || colors.length === 0) return;
+  if (colors.length === 1) {
+    L.polyline([a, b], {
+      color: colors[0],
+      weight: width,
+      opacity: 1,
+      lineCap: "round",
+    }).addTo(layer);
+    return;
+  }
+
+  const laneStep = Math.max(2, width / colors.length);
+  const laneWidth = Math.max(2, laneStep - 0.4);
+  for (let i = 0; i < colors.length; i += 1) {
+    const off = (i - ((colors.length - 1) / 2)) * laneStep;
+    const lane = offsetLatLonPolylineForMap(mapObj, [a, b], off);
+    L.polyline(lane, {
+      color: colors[i],
+      weight: laneWidth,
+      opacity: 1,
+      lineCap: "round",
+    }).addTo(layer);
+  }
 }
 
 function latLonToWorld(lat, lon, zoom) {
@@ -451,25 +611,33 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
   if (renderToken !== signRenderToken) return;
 
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
+  const sharedEdges = buildSharedEdges(segments);
 
   for (const seg of segments) {
     const pixelPoints = seg.points.map(([lat, lon]) => {
       const [px, py] = project(lat, lon);
       return { x: px, y: py };
     });
-    const shifted = offsetPolylinePixels(pixelPoints, seg.offsetPx || 0);
 
     ctx.strokeStyle = seg.lineColor;
     ctx.lineWidth = 5;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.beginPath();
-    for (let i = 0; i < shifted.length; i += 1) {
-      const p = shifted[i];
+    for (let i = 0; i < pixelPoints.length; i += 1) {
+      const p = pixelPoints[i];
       if (i === 0) ctx.moveTo(p.x, p.y);
       else ctx.lineTo(p.x, p.y);
     }
     ctx.stroke();
+  }
+
+  for (const e of sharedEdges) {
+    const [x1, y1] = project(e.a[0], e.a[1]);
+    const [x2, y2] = project(e.b[0], e.b[1]);
+    const orderedIds = e.orderedRouteIds && e.orderedRouteIds.length ? e.orderedRouteIds : Array.from(e.routeIds).sort();
+    const colors = orderedIds.map((rid) => e.colorByRoute.get(rid));
+    drawStripedLineOnCanvas(ctx, x1, y1, x2, y2, colors, 5);
   }
 
   if (stopLat != null && stopLon != null) {
@@ -600,6 +768,7 @@ function drawRouteMapForStop(stop, items, maxRoutes) {
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
   const segments = buildRouteSegmentsForStop(stop, items, maxRoutes);
+  const sharedEdges = buildSharedEdges(segments);
 
   if (stopLat != null && stopLon != null) {
     L.circleMarker([stopLat, stopLon], {
@@ -626,12 +795,16 @@ function drawRouteMapForStop(stop, items, maxRoutes) {
   }
 
   for (const seg of segments) {
-    const drawn = offsetLatLonPolylineForMap(modalMap, seg.points, seg.offsetPx || 0);
-    L.polyline(drawn, {
+    L.polyline(seg.points, {
       color: seg.lineColor,
       weight: 4,
       opacity: 0.9,
     }).addTo(modalRouteLayer);
+  }
+  for (const e of sharedEdges) {
+    const orderedIds = e.orderedRouteIds && e.orderedRouteIds.length ? e.orderedRouteIds : Array.from(e.routeIds).sort();
+    const colors = orderedIds.map((rid) => e.colorByRoute.get(rid));
+    drawStripedLineOnMap(modalRouteLayer, modalMap, e.a, e.b, colors, 4);
   }
 
   if (segments.length === 0) {
@@ -771,6 +944,169 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken }
   ctx.fillText("Generated from GTFS • edit styles in app.js", pad, H - 40);
 }
 
+function escXml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
+  const W = 900;
+  const H = 1200;
+  const pad = 50;
+  const headerH = 170;
+  const mapTop = headerH + 24;
+  const mapHeight = 300;
+  const routeTop = mapTop + mapHeight + 64;
+  const rowH = 90;
+  const pillR = 34;
+
+  const routeSegments = buildRouteSegmentsForStop(stop, items, maxRoutes);
+  const shown = items.slice(0, maxRoutes);
+  const bounds = getRouteBounds(stop, routeSegments);
+  const sharedEdges = buildSharedEdges(routeSegments);
+
+  const mapOuterX = pad;
+  const mapOuterY = mapTop + 6;
+  const mapOuterW = W - (pad * 2);
+  const mapOuterH = mapHeight;
+  const mapInnerPad = 18;
+  const legendH = 30;
+  const drawX = mapOuterX + mapInnerPad;
+  const drawY = mapOuterY + mapInnerPad;
+  const drawW = mapOuterW - (mapInnerPad * 2);
+  const drawH = mapOuterH - (mapInnerPad * 2) - legendH;
+  const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
+
+  const zoom = chooseMapZoom(bounds, drawW, drawH);
+  const centerLat = (bounds.minLat + bounds.maxLat) / 2;
+  const centerLon = (bounds.minLon + bounds.maxLon) / 2;
+  const centerWorld = latLonToWorld(centerLat, centerLon, zoom);
+  const left = centerWorld.x - (drawW / 2);
+  const top = centerWorld.y - (drawH / 2);
+  const right = centerWorld.x + (drawW / 2);
+  const bottom = centerWorld.y + (drawH / 2);
+  const x0 = Math.floor(left / 256);
+  const y0 = Math.floor(top / 256);
+  const x1 = Math.floor(right / 256);
+  const y1 = Math.floor(bottom / 256);
+
+  const stopLat = safeParseFloat(stop.stop_lat);
+  const stopLon = safeParseFloat(stop.stop_lon);
+  const stopPt = (stopLat != null && stopLon != null) ? project(stopLat, stopLon) : null;
+  const subtitle = `${stop.stop_name || "—"} • ${directionFilter === "all" ? "All directions" : `Direction ${directionFilter}`}`;
+  const code = stop.stop_code ? `#${stop.stop_code}` : `#${stop.stop_id}`;
+
+  const mapClipId = "mapClip";
+  const mapTileSvg = [];
+  for (let tx = x0; tx <= x1; tx += 1) {
+    for (let ty = y0; ty <= y1; ty += 1) {
+      const n = 2 ** zoom;
+      if (ty < 0 || ty >= n) continue;
+      const txx = ((tx % n) + n) % n;
+      const px = drawX + ((tx * 256) - left);
+      const py = drawY + ((ty * 256) - top);
+      mapTileSvg.push(`<image href="https://tile.openstreetmap.org/${zoom}/${txx}/${ty}.png" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="256" height="256" />`);
+    }
+  }
+
+  const routePathSvg = [];
+  for (const seg of routeSegments) {
+    if (!seg.points.length) continue;
+    const d = seg.points.map(([lat, lon], i) => {
+      const [x, y] = project(lat, lon);
+      return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    }).join(" ");
+    routePathSvg.push(`<path d="${d}" fill="none" stroke="${seg.lineColor}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />`);
+  }
+
+  const sharedLaneSvg = [];
+  for (const e of sharedEdges) {
+    const [x1p, y1p] = project(e.a[0], e.a[1]);
+    const [x2p, y2p] = project(e.b[0], e.b[1]);
+    const orderedIds = e.orderedRouteIds && e.orderedRouteIds.length ? e.orderedRouteIds : Array.from(e.routeIds).sort();
+    const colors = orderedIds.map((rid) => e.colorByRoute.get(rid));
+    if (colors.length <= 1) continue;
+
+    const dx = x2p - x1p;
+    const dy = y2p - y1p;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len;
+    const ny = dx / len;
+    const laneStep = Math.max(2, 5 / colors.length);
+    const laneWidth = Math.max(2, laneStep - 0.4);
+    for (let i = 0; i < colors.length; i += 1) {
+      const off = (i - ((colors.length - 1) / 2)) * laneStep;
+      const ox = nx * off;
+      const oy = ny * off;
+      sharedLaneSvg.push(`<line x1="${(x1p + ox).toFixed(2)}" y1="${(y1p + oy).toFixed(2)}" x2="${(x2p + ox).toFixed(2)}" y2="${(y2p + oy).toFixed(2)}" stroke="${colors[i]}" stroke-width="${laneWidth.toFixed(2)}" stroke-linecap="round" />`);
+    }
+  }
+
+  const legendSvg = [];
+  let legendX = mapOuterX + 14;
+  const legendY = mapOuterY + mapOuterH - 12;
+  for (const seg of routeSegments.slice(0, 6)) {
+    const label = seg.route_short_name || "Route";
+    const estW = (label.length * 8) + 38;
+    if (legendX + estW > mapOuterX + mapOuterW - 10) break;
+    legendSvg.push(`<rect x="${legendX.toFixed(2)}" y="${(legendY - 10).toFixed(2)}" width="18" height="5" rx="2" fill="${seg.lineColor}" />`);
+    legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="14" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(label)}</text>`);
+    legendX += estW;
+  }
+
+  const routesSvg = [];
+  let y = routeTop + 30;
+  if (shown.length === 0) {
+    routesSvg.push(`<text x="${pad}" y="${routeTop}" fill="#111111" font-size="26" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">No route/trip data found for this stop (in the loaded GTFS).</text>`);
+  } else {
+    routesSvg.push(`<text x="${pad}" y="${routeTop - 18}" fill="#111111" font-size="26" font-weight="800" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Routes</text>`);
+    for (const it of shown) {
+      const r = routesById.get(it.route_id);
+      const routeNum = (r?.route_short_name ?? "").toString().trim() || "•";
+      const dest = (it.headsign || r?.route_long_name || r?.route_short_name || "").toString().trim().slice(0, 40);
+      const bg = normalizeColor(r?.route_color, it.route_color || "#3b82f6");
+      const fg = r?.route_text_color ? normalizeColor(r.route_text_color, pickTextColor(bg)) : pickTextColor(bg);
+      const meta = `dir ${it.direction_id ?? "?"} • patterns: ${it.count}`;
+      routesSvg.push(`<circle cx="${pad + pillR}" cy="${y}" r="${pillR}" fill="${bg}" />`);
+      routesSvg.push(`<text x="${pad + pillR}" y="${y + 10}" text-anchor="middle" fill="${fg}" font-size="30" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(routeNum)}</text>`);
+      routesSvg.push(`<text x="${pad + (pillR * 2) + 18}" y="${y + 10}" fill="#111111" font-size="28" font-weight="800" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(dest)}</text>`);
+      routesSvg.push(`<text x="${pad + (pillR * 2) + 18}" y="${y + 40}" fill="#666666" font-size="18" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(meta)}</text>`);
+      y += rowH;
+      if (y > H - 120) break;
+    }
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  <defs>
+    <clipPath id="${mapClipId}">
+      <rect x="${drawX.toFixed(2)}" y="${drawY.toFixed(2)}" width="${drawW.toFixed(2)}" height="${drawH.toFixed(2)}" rx="10" />
+    </clipPath>
+  </defs>
+  <rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />
+  <text x="${pad}" y="80" fill="#111111" font-size="56" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Bus Stop</text>
+  <text x="${pad}" y="120" fill="#333333" font-size="28" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(code)}</text>
+  <rect x="${W - pad - 110}" y="35" width="110" height="110" rx="18" fill="#2b6dff" />
+  <text x="${W - pad - 55}" y="109" text-anchor="middle" fill="#ffffff" font-size="72" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">T</text>
+  <text x="${pad}" y="${headerH}" fill="#666666" font-size="22" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(subtitle)}</text>
+  <text x="${pad}" y="${mapTop - 8}" fill="#111111" font-size="24" font-weight="800" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Route map (from this stop onward)</text>
+  <rect x="${mapOuterX}" y="${mapOuterY}" width="${mapOuterW}" height="${mapOuterH}" rx="14" fill="#fafafa" stroke="#dddddd" />
+  <g clip-path="url(#${mapClipId})">
+    ${mapTileSvg.join("")}
+  </g>
+  ${routePathSvg.join("")}
+  ${sharedLaneSvg.join("")}
+  ${stopPt ? `<circle cx="${stopPt[0].toFixed(2)}" cy="${stopPt[1].toFixed(2)}" r="6" fill="#ffffff" stroke="#111111" stroke-width="2" />` : ""}
+  ${legendSvg.join("")}
+  ${routesSvg.join("")}
+  <text x="${pad}" y="${H - 40}" fill="#888888" font-size="16" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Generated from GTFS • edit styles in app.js</text>
+</svg>`;
+}
+
 function roundRect(ctx, x, y, w, h, r, fill, stroke) {
   const rr = Math.min(r, w/2, h/2);
   ctx.beginPath();
@@ -834,6 +1170,31 @@ ui.downloadBtn.addEventListener("click", () => {
   } catch (err) {
     console.error(err);
     alert("Failed to export PNG. Try again in a moment.");
+  }
+});
+
+ui.downloadSvgBtn.addEventListener("click", () => {
+  const stop = selectedStop;
+  if (!stop) return;
+
+  const directionFilter = ui.directionSelect.value || "all";
+  const maxRoutes = Math.max(4, Math.min(20, parseInt(ui.maxRoutes.value || "6", 10)));
+  const items = computeRouteSummaryForStop(stop, directionFilter);
+  const svg = buildSignSvg({ stop, items, directionFilter, maxRoutes });
+
+  const name = (stop.stop_name || "bus_stop").toString().replace(/[^\w\-]+/g, "_").slice(0, 50);
+  const code = (stop.stop_code || stop.stop_id || "").toString().replace(/[^\w\-]+/g, "_").slice(0, 30);
+  const filename = `${name}_${code}_dir-${directionFilter}.svg`;
+
+  const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.download = filename;
+    a.href = url;
+    a.click();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 });
 
