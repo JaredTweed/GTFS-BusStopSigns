@@ -35,14 +35,10 @@ const ui = {
   copyBtn: el("copyBtn"),
   downloadSvgBtn: el("downloadSvgBtn"),
   signCanvas: el("signCanvas"),
-  modalRouteMap: el("modalRouteMap"),
-  modalRouteMapHint: el("modalRouteMapHint"),
 };
 
 let map;
 let markerCluster;
-let modalMap;
-let modalRouteLayer;
 
 // GTFS data stores
 let stops = [];          // [{stop_id, stop_name, stop_lat, stop_lon, stop_code?}]
@@ -145,21 +141,6 @@ function addStopsToMap() {
     m.on("click", () => openStop(s));
     markerCluster.addLayer(m);
   }
-}
-
-function initModalMap() {
-  if (modalMap || !ui.modalRouteMap) return;
-
-  modalMap = L.map(ui.modalRouteMap, {
-    preferCanvas: true,
-    zoomControl: true,
-    attributionControl: false,
-  }).setView([49.25, -123.12], 12);
-
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; OpenStreetMap contributors",
-  }).addTo(modalMap);
 }
 
 function openModal() {
@@ -1769,73 +1750,6 @@ function computeRouteSummaryForStop(stop, directionFilter) {
   return items;
 }
 
-function drawRouteMapForStop(stop, items, maxRoutes) {
-  if (!ui.modalRouteMap || !stop) return;
-
-  initModalMap();
-  if (!modalMap) return;
-
-  if (modalRouteLayer) {
-    modalMap.removeLayer(modalRouteLayer);
-  }
-  modalRouteLayer = L.featureGroup().addTo(modalMap);
-
-  const stopLat = safeParseFloat(stop.stop_lat);
-  const stopLon = safeParseFloat(stop.stop_lon);
-  const segments = buildRouteSegmentsForStop(stop, items, maxRoutes);
-  const sharedEdges = buildSharedEdges(segments, stop);
-  const sharedChains = buildSharedLaneChains(sharedEdges);
-  const sharedEdgeKeySet = new Set(sharedEdges.map((e) => e.key));
-
-  if (stopLat != null && stopLon != null) {
-    L.circleMarker([stopLat, stopLon], {
-      radius: 6,
-      weight: 2,
-      color: "#111111",
-      fillColor: "#ffffff",
-      fillOpacity: 1,
-    }).bindTooltip(stop.stop_name || "Stop").addTo(modalRouteLayer);
-  }
-
-  const fitGroup = L.featureGroup();
-  if (stopLat != null && stopLon != null) {
-    fitGroup.addLayer(L.circleMarker([stopLat, stopLon], { radius: 0, opacity: 0, fillOpacity: 0 }));
-  }
-  for (const seg of segments) {
-    fitGroup.addLayer(L.polyline(seg.points, { opacity: 0 }));
-  }
-  const rawBounds = fitGroup.getBounds();
-  if (rawBounds && rawBounds.isValid()) {
-    modalMap.fitBounds(rawBounds.pad(0.12));
-  } else if (stopLat != null && stopLon != null) {
-    modalMap.setView([stopLat, stopLon], 15);
-  }
-
-  for (const seg of segments) {
-    const runs = buildNonSharedRuns(seg.points, sharedEdgeKeySet);
-    for (const run of runs) {
-      L.polyline(run, {
-        color: seg.lineColor,
-        weight: 4,
-        opacity: 0.9,
-        lineCap: "round",
-        lineJoin: "round",
-      }).addTo(modalRouteLayer);
-    }
-  }
-  for (const chain of sharedChains) {
-    drawStripedPolylineOnMap(modalRouteLayer, modalMap, chain.points, chain.colors, 4, { lineCap: "butt" });
-  }
-
-  if (segments.length === 0) {
-    ui.modalRouteMapHint.textContent = "No route geometry available for the selected direction.";
-  } else {
-    ui.modalRouteMapHint.textContent = `${segments.length} route pattern${segments.length === 1 ? "" : "s"} shown from this stop onward.`;
-  }
-
-  setTimeout(() => modalMap.invalidateSize(), 0);
-}
-
 async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken }) {
   const canvas = ui.signCanvas;
   const ctx = canvas.getContext("2d");
@@ -2160,7 +2074,6 @@ function openStop(stop) {
     maxRoutes,
     renderToken,
   }).catch((err) => console.error("Sign render failed", err));
-  drawRouteMapForStop(stop, selectedStopRouteSummary, maxRoutes);
 }
 
 ui.directionSelect.addEventListener("change", () => {
@@ -2265,11 +2178,6 @@ async function boot({ zipUrl, zipFile, zipName }) {
   shapesById = new Map();
   selectedStop = null;
   selectedStopRouteSummary = null;
-  if (modalRouteLayer && modalMap) {
-    modalMap.removeLayer(modalRouteLayer);
-    modalRouteLayer = null;
-  }
-  if (ui.modalRouteMapHint) ui.modalRouteMapHint.textContent = "";
 
   try {
     const zip = zipFile ? await loadZipFromFile(zipFile) : await loadZipFromUrl(zipUrl);
