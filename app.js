@@ -96,7 +96,7 @@ function formatClockTimeFromSeconds(sec) {
   const h24 = Math.floor(t / 3600);
   const m = Math.floor((t % 3600) / 60);
   const h12 = ((h24 + 11) % 12) + 1;
-  const ampm = h24 >= 12 ? "p" : "a";
+  const ampm = h24 >= 12 ? "pm" : "am";
   const base = `${h12}:${String(m).padStart(2, "0")}${ampm}`;
   return dayOffset > 0 ? `${base}+${dayOffset}` : base;
 }
@@ -145,14 +145,13 @@ function summarizeFrequencyWindows(timesSec) {
   return windows;
 }
 
-function buildActiveHoursMetaText(directionId, timesSec = []) {
-  const dirLabel = `dir ${directionId ?? "?"}`;
+function buildActiveHoursText(timesSec = []) {
   const sorted = (timesSec || [])
     .filter((x) => Number.isFinite(x))
     .sort((a, b) => a - b);
-  if (sorted.length === 0) return `${dirLabel} • active hours unavailable`;
-  if (sorted.length === 1) return `${dirLabel} • active: ${formatClockTimeFromSeconds(sorted[0])}`;
-  return `${dirLabel} • active: ${formatClockTimeFromSeconds(sorted[0])}-${formatClockTimeFromSeconds(sorted[sorted.length - 1])}`;
+  if (sorted.length === 0) return "";
+  if (sorted.length === 1) return `${formatClockTimeFromSeconds(sorted[0])}`;
+  return `${formatClockTimeFromSeconds(sorted[0])}-${formatClockTimeFromSeconds(sorted[sorted.length - 1])}`;
 }
 
 function parseCSVFromZip(zip, filename, { stepRow, complete } = {}) {
@@ -300,6 +299,7 @@ function buildRouteSegmentsForStop(stop, items, maxRoutes) {
     segments.push({
       route_id: it.route_id,
       route_short_name: it.route_short_name || "",
+      active_hours_text: it.active_hours_text || buildActiveHoursText([]),
       shape_id: it.shape_id,
       points: clipped,
       baseColor: normalizeColor(it.route_color, "#2b6dff"),
@@ -1667,7 +1667,7 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
   }
 
   const pad = 18;
-  const legendH = 30;
+  const legendH = 56;
   const drawX = x + pad;
   const drawY = y + pad;
   const drawW = w - (pad * 2);
@@ -1731,14 +1731,24 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
   }
 
   let legendX = x + 14;
-  const legendY = y + h - 12;
-  ctx.font = "700 14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+  let legendRow = 0;
+  const legendRowH = 18;
+  const legendRows = 2;
+  const legendTop = y + h - (legendRows * legendRowH) - 4;
+  ctx.font = "700 12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
   for (const seg of segments.slice(0, 6)) {
-    const label = seg.route_short_name || "Route";
+    const routeLabel = seg.route_short_name || "Route";
+    const rawLabel = seg.active_hours_text ? `${routeLabel} (${seg.active_hours_text})` : routeLabel;
+    const label = rawLabel.length > 46 ? `${rawLabel.slice(0, 43)}...` : rawLabel;
     const swatchW = 18;
     const textW = ctx.measureText(label).width;
     const blockW = swatchW + 8 + textW + 12;
-    if (legendX + blockW > x + w - 10) break;
+    if (legendX + blockW > x + w - 10) {
+      legendRow += 1;
+      if (legendRow >= legendRows) break;
+      legendX = x + 14;
+    }
+    const legendY = legendTop + (legendRow * legendRowH) + 12;
 
     ctx.fillStyle = seg.lineColor;
     roundRect(ctx, legendX, legendY - 10, swatchW, 5, 2, true, false);
@@ -1821,7 +1831,7 @@ function computeRouteSummaryForStop(stop, directionFilter) {
       route_short_name: shortName,
       route_color: normalizeColor(r?.route_color, "#3b82f6"),
       frequency_windows: windows,
-      frequency_meta: buildActiveHoursMetaText(x.direction_id, x.times),
+      active_hours_text: buildActiveHoursText(x.times),
     };
   });
 
@@ -1889,13 +1899,15 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken }
 
   // Route map preview (this is rendered into the PNG)
   const mapTop = headerH + 24;
-  const mapHeight = 300;
+  const mapY = mapTop + 6;
+  const footerY = H - 40;
+  const mapHeight = Math.max(220, (footerY - mapY) - 18);
   ctx.fillStyle = "#111111";
   ctx.font = "800 24px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
   ctx.fillText("Route map (from this stop onward)", pad, mapTop - 8);
   await drawRoutePreviewOnCanvas(ctx, {
     x: pad,
-    y: mapTop + 6,
+    y: mapY,
     w: W - (pad * 2),
     h: mapHeight,
     stop,
@@ -1904,63 +1916,6 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken }
   });
 
   if (renderToken !== signRenderToken) return;
-
-  // Route pills
-  const top = mapTop + mapHeight + 64;
-  const rowH = 90;
-  const pillR = 34;
-
-  const shown = items.slice(0, maxRoutes);
-  if (shown.length === 0) {
-    ctx.fillStyle = "#111111";
-    ctx.font = "700 26px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-    ctx.fillText("No route/trip data found for this stop (in the loaded GTFS).", pad, top);
-    return;
-  }
-
-  // Section label
-  ctx.fillStyle = "#111111";
-  ctx.font = "800 26px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  ctx.fillText("Routes", pad, top - 18);
-
-  let y = top + 30;
-  for (const it of shown) {
-    const r = routesById.get(it.route_id);
-    const routeNum = (r?.route_short_name ?? "").toString().trim() || "•";
-    const dest = (it.headsign || r?.route_long_name || r?.route_short_name || "").toString().trim();
-
-    const bg = normalizeColor(r?.route_color, it.route_color || "#3b82f6");
-    const fg = r?.route_text_color ? normalizeColor(r.route_text_color, pickTextColor(bg)) : pickTextColor(bg);
-
-    // Circle
-    ctx.fillStyle = bg;
-    ctx.beginPath();
-    ctx.arc(pad + pillR, y, pillR, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Route number
-    ctx.fillStyle = fg;
-    ctx.font = "900 30px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(routeNum, pad + pillR, y + 1);
-
-    // Destination
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "#111111";
-    ctx.font = "800 28px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-    ctx.fillText(dest.slice(0, 40), pad + (pillR*2) + 18, y + 10);
-
-    // Secondary label (direction id + popularity proxy)
-    const meta = it.frequency_meta || buildActiveHoursMetaText(it.direction_id);
-    ctx.fillStyle = "#666666";
-    ctx.font = "600 18px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-    ctx.fillText(meta.slice(0, 78), pad + (pillR*2) + 18, y + 40);
-
-    y += rowH;
-    if (y > H - 120) break;
-  }
 
   // Footer
   ctx.fillStyle = "#888888";
@@ -1983,24 +1938,22 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   const pad = 50;
   const headerH = 170;
   const mapTop = headerH + 24;
-  const mapHeight = 300;
-  const routeTop = mapTop + mapHeight + 64;
-  const rowH = 90;
-  const pillR = 34;
+  const mapY = mapTop + 6;
+  const footerY = H - 40;
 
   const routeSegments = buildRouteSegmentsForStop(stop, items, maxRoutes);
-  const shown = items.slice(0, maxRoutes);
+  const mapHeight = Math.max(220, (footerY - mapY) - 18);
   const bounds = getRouteBounds(stop, routeSegments);
   const sharedEdges = buildSharedEdges(routeSegments, stop);
   const sharedChains = buildSharedLaneChains(sharedEdges);
   const sharedEdgeKeySet = new Set(sharedEdges.map((e) => e.key));
 
   const mapOuterX = pad;
-  const mapOuterY = mapTop + 6;
+  const mapOuterY = mapY;
   const mapOuterW = W - (pad * 2);
   const mapOuterH = mapHeight;
   const mapInnerPad = 18;
-  const legendH = 30;
+  const legendH = 56;
   const drawX = mapOuterX + mapInnerPad;
   const drawY = mapOuterY + mapInnerPad;
   const drawW = mapOuterW - (mapInnerPad * 2);
@@ -2073,36 +2026,24 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
 
   const legendSvg = [];
   let legendX = mapOuterX + 14;
-  const legendY = mapOuterY + mapOuterH - 12;
+  let legendRow = 0;
+  const legendRows = 2;
+  const legendRowH = 18;
+  const legendTop = mapOuterY + mapOuterH - (legendRows * legendRowH) - 4;
   for (const seg of routeSegments.slice(0, 6)) {
-    const label = seg.route_short_name || "Route";
-    const estW = (label.length * 8) + 38;
-    if (legendX + estW > mapOuterX + mapOuterW - 10) break;
-    legendSvg.push(`<rect x="${legendX.toFixed(2)}" y="${(legendY - 10).toFixed(2)}" width="18" height="5" rx="2" fill="${seg.lineColor}" />`);
-    legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="14" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(label)}</text>`);
-    legendX += estW;
-  }
-
-  const routesSvg = [];
-  let y = routeTop + 30;
-  if (shown.length === 0) {
-    routesSvg.push(`<text x="${pad}" y="${routeTop}" fill="#111111" font-size="26" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">No route/trip data found for this stop (in the loaded GTFS).</text>`);
-  } else {
-    routesSvg.push(`<text x="${pad}" y="${routeTop - 18}" fill="#111111" font-size="26" font-weight="800" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Routes</text>`);
-    for (const it of shown) {
-      const r = routesById.get(it.route_id);
-      const routeNum = (r?.route_short_name ?? "").toString().trim() || "•";
-      const dest = (it.headsign || r?.route_long_name || r?.route_short_name || "").toString().trim().slice(0, 40);
-      const bg = normalizeColor(r?.route_color, it.route_color || "#3b82f6");
-      const fg = r?.route_text_color ? normalizeColor(r.route_text_color, pickTextColor(bg)) : pickTextColor(bg);
-      const meta = it.frequency_meta || buildActiveHoursMetaText(it.direction_id);
-      routesSvg.push(`<circle cx="${pad + pillR}" cy="${y}" r="${pillR}" fill="${bg}" />`);
-      routesSvg.push(`<text x="${pad + pillR}" y="${y + 10}" text-anchor="middle" fill="${fg}" font-size="30" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(routeNum)}</text>`);
-      routesSvg.push(`<text x="${pad + (pillR * 2) + 18}" y="${y + 10}" fill="#111111" font-size="28" font-weight="800" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(dest)}</text>`);
-      routesSvg.push(`<text x="${pad + (pillR * 2) + 18}" y="${y + 40}" fill="#666666" font-size="18" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(meta.slice(0, 78))}</text>`);
-      y += rowH;
-      if (y > H - 120) break;
+    const routeLabel = seg.route_short_name || "Route";
+    const rawLabel = seg.active_hours_text ? `${routeLabel} (${seg.active_hours_text})` : routeLabel;
+    const label = rawLabel.length > 46 ? `${rawLabel.slice(0, 43)}...` : rawLabel;
+    const estW = (label.length * 7) + 38;
+    if (legendX + estW > mapOuterX + mapOuterW - 10) {
+      legendRow += 1;
+      if (legendRow >= legendRows) break;
+      legendX = mapOuterX + 14;
     }
+    const legendY = legendTop + (legendRow * legendRowH) + 12;
+    legendSvg.push(`<rect x="${legendX.toFixed(2)}" y="${(legendY - 10).toFixed(2)}" width="18" height="5" rx="2" fill="${seg.lineColor}" />`);
+    legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(label)}</text>`);
+    legendX += estW;
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -2127,7 +2068,6 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   ${sharedLaneSvg.join("")}
   ${stopPt ? `<circle cx="${stopPt[0].toFixed(2)}" cy="${stopPt[1].toFixed(2)}" r="6" fill="#ffffff" stroke="#111111" stroke-width="2" />` : ""}
   ${legendSvg.join("")}
-  ${routesSvg.join("")}
   <text x="${pad}" y="${H - 40}" fill="#888888" font-size="16" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Generated from GTFS • edit styles in app.js</text>
 </svg>`;
 }
