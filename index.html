@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GTFS Bus Stop Map + Sign Generator</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- MarkerCluster -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"/>
+  <script defer src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+
+  <!-- CSV + ZIP parsing -->
+  <script defer src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+  <link rel="stylesheet" href="./styles.css" />
+  <script defer src="./app.js"></script>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="topbar__left">
+      <div class="brand">Bus Stop Map</div>
+      <div class="muted">Click a stop → pick direction → download a sign PNG</div>
+    </div>
+
+    <div class="topbar__right">
+      <button id="reloadBtn" class="btn btn--ghost" title="Reload data">Reload</button>
+      <label class="btn btn--ghost fileBtn" title="Load a different GTFS zip">
+        Load GTFS ZIP…
+        <input id="gtfsFile" type="file" accept=".zip" />
+      </label>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section id="map" class="map"></section>
+
+    <aside class="side">
+      <div class="card">
+        <div class="card__title">Data status</div>
+        <div class="kv">
+          <div>GTFS zip</div><div id="zipName" class="muted">google_transit.zip</div>
+          <div>Stops</div><div id="stopsCount" class="muted">—</div>
+          <div>Routes</div><div id="routesCount" class="muted">—</div>
+          <div>Trips</div><div id="tripsCount" class="muted">—</div>
+          <div>Stop→Trips index</div><div id="indexCount" class="muted">—</div>
+        </div>
+        <div class="progress">
+          <div id="progressBar" class="progress__bar" style="width:0%"></div>
+        </div>
+        <div id="progressText" class="muted small">Loading…</div>
+      </div>
+
+      <div class="card">
+        <div class="card__title">Tips</div>
+        <ul class="small">
+          <li>Zoom in for faster clicking (fewer markers in a cluster).</li>
+          <li>Some stops serve many routes; the sign shows top routes for the chosen direction.</li>
+          <li>If you host this, keep <code>google_transit.zip</code> beside these files.</li>
+        </ul>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Sign Modal -->
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Bus stop sign">
+    <div class="modal__backdrop" id="modalBackdrop"></div>
+    <div class="modal__panel">
+      <div class="modal__header">
+        <div>
+          <div id="modalTitle" class="modal__title">Bus Stop</div>
+          <div id="modalSubtitle" class="muted small">—</div>
+        </div>
+        <button id="closeModal" class="btn btn--ghost">Close</button>
+      </div>
+
+      <div class="modal__controls">
+        <label class="field">
+          <div class="field__label">Direction</div>
+          <select id="directionSelect" class="input">
+            <option value="all">All directions</option>
+            <option value="0">Direction 0</option>
+            <option value="1">Direction 1</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <div class="field__label">Max routes on sign</div>
+          <input id="maxRoutes" class="input" type="number" min="4" max="20" value="6" />
+        </label>
+
+        <button id="downloadBtn" class="btn btn--primary">Download PNG</button>
+      </div>
+
+      <div class="modal__body">
+        <div class="signWrap">
+          <canvas id="signCanvas" width="900" height="1200"></canvas>
+        </div>
+        <div class="muted small">
+          Note: This prototype draws a clean, printable sign (header + route “pills” + destinations). You can restyle the canvas in <code>app.js</code>.
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
