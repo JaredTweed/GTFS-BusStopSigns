@@ -257,24 +257,82 @@ function assignParallelOffsets(segments) {
 
 function offsetPolylinePixels(pixelPoints, offsetPx) {
   if (!offsetPx || pixelPoints.length < 2) return pixelPoints.slice();
-  const shifted = [];
 
-  for (let i = 0; i < pixelPoints.length; i += 1) {
-    const prev = pixelPoints[Math.max(0, i - 1)];
-    const curr = pixelPoints[i];
-    const next = pixelPoints[Math.min(pixelPoints.length - 1, i + 1)];
-
-    const tx = next.x - prev.x;
-    const ty = next.y - prev.y;
-    const len = Math.hypot(tx, ty) || 1;
-    const nx = -ty / len;
-    const ny = tx / len;
-
-    shifted.push({
-      x: curr.x + (nx * offsetPx),
-      y: curr.y + (ny * offsetPx),
-    });
+  const pts = [];
+  for (const p of pixelPoints) {
+    const pp = { x: p.x, y: p.y };
+    if (!pts.length) {
+      pts.push(pp);
+      continue;
+    }
+    const last = pts[pts.length - 1];
+    if (Math.hypot(pp.x - last.x, pp.y - last.y) > 1e-3) pts.push(pp);
   }
+  if (pts.length < 2) return pts;
+
+  const segs = [];
+  for (let i = 0; i < pts.length - 1; i += 1) {
+    const dx = pts[i + 1].x - pts[i].x;
+    const dy = pts[i + 1].y - pts[i].y;
+    const len = Math.hypot(dx, dy) || 1;
+    const tx = dx / len;
+    const ty = dy / len;
+    segs.push({ tx, ty, nx: -ty, ny: tx });
+  }
+
+  const shifted = new Array(pts.length);
+  shifted[0] = {
+    x: pts[0].x + (segs[0].nx * offsetPx),
+    y: pts[0].y + (segs[0].ny * offsetPx),
+  };
+
+  const maxMiter = Math.max(4, Math.abs(offsetPx) * 6);
+  for (let i = 1; i < pts.length - 1; i += 1) {
+    const p = pts[i];
+    const a = segs[i - 1];
+    const b = segs[i];
+
+    const ax = p.x + (a.nx * offsetPx);
+    const ay = p.y + (a.ny * offsetPx);
+    const bx = p.x + (b.nx * offsetPx);
+    const by = p.y + (b.ny * offsetPx);
+
+    const denom = (a.tx * b.ty) - (a.ty * b.tx);
+    let ix = null;
+    let iy = null;
+    if (Math.abs(denom) > 1e-6) {
+      const rx = bx - ax;
+      const ry = by - ay;
+      const t = ((rx * b.ty) - (ry * b.tx)) / denom;
+      ix = ax + (a.tx * t);
+      iy = ay + (a.ty * t);
+      if (Math.hypot(ix - p.x, iy - p.y) > maxMiter) {
+        ix = null;
+        iy = null;
+      }
+    }
+
+    if (ix == null || iy == null) {
+      const bnx = a.nx + b.nx;
+      const bny = a.ny + b.ny;
+      const blen = Math.hypot(bnx, bny);
+      if (blen > 1e-6) {
+        ix = p.x + ((bnx / blen) * offsetPx);
+        iy = p.y + ((bny / blen) * offsetPx);
+      } else {
+        ix = p.x + (a.nx * offsetPx);
+        iy = p.y + (a.ny * offsetPx);
+      }
+    }
+
+    shifted[i] = { x: ix, y: iy };
+  }
+
+  const lastIdx = pts.length - 1;
+  shifted[lastIdx] = {
+    x: pts[lastIdx].x + (segs[segs.length - 1].nx * offsetPx),
+    y: pts[lastIdx].y + (segs[segs.length - 1].ny * offsetPx),
+  };
 
   return shifted;
 }
@@ -934,6 +992,36 @@ function buildSharedEdges(segments, stop = null) {
     return targets;
   }
 
+  function buildBoundaryEdgePreferences(comp) {
+    const prefs = [];
+    const seen = new Set();
+    const eps = 1e-9;
+
+    for (const nodeKey of comp.nodeKeys) {
+      const { nx, ny } = normalFromCompAtNode(comp, nodeKey, comp.routeIds);
+      for (const rid of comp.routeIds) {
+        const obs = routeBoundaryObservation(comp, rid, nodeKey, nx, ny, { requireOutside: true });
+        if (!obs || !Number.isFinite(obs.side) || Math.abs(obs.side) < eps) continue;
+        if (obs.transition !== "split" && obs.transition !== "merge") continue;
+
+        const key = `${rid}|${nodeKey}|${obs.transition}|${Math.sign(obs.side)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        prefs.push({
+          rid,
+          nodeKey,
+          side: obs.side,
+          transition: obs.transition,
+          nodeIdx: Number.isFinite(obs.nodeIdx) ? obs.nodeIdx : Infinity,
+          strength: Math.abs(obs.side),
+        });
+      }
+    }
+
+    return prefs;
+  }
+
   function evaluateOrder(comp, candidate, knownNeighborEntries) {
     const baseTarget = comp.routeIds.slice().sort((a, b) => {
       const ds = (comp.baseScores.get(b) ?? 0) - (comp.baseScores.get(a) ?? 0);
@@ -941,6 +1029,9 @@ function buildSharedEdges(segments, stop = null) {
       return String(a).localeCompare(String(b));
     });
     let cost = 0.25 * inversionDistance(candidate, baseTarget);
+    const candidatePos = new Map();
+    for (let i = 0; i < candidate.length; i += 1) candidatePos.set(candidate[i], i);
+    const n = candidate.length;
 
     for (const entry of knownNeighborEntries) {
       const nei = entry.nei;
@@ -948,7 +1039,7 @@ function buildSharedEdges(segments, stop = null) {
       const candShared = candidate.filter((r) => neiShared.includes(r));
 
       const crossCost = inversionDistance(candShared, neiShared);
-      cost += 80 * crossCost;
+      cost += 64 * crossCost;
 
       const nodeKeys = Array.isArray(entry.nodeKeys) && entry.nodeKeys.length
         ? entry.nodeKeys
@@ -956,7 +1047,7 @@ function buildSharedEdges(segments, stop = null) {
       for (const nodeKey of nodeKeys) {
         const expected = expectedOrderFromNeighbor(comp, nei, nodeKey);
         const mergeCost = inversionDistance(candidate, expected);
-        cost += 28 * mergeCost;
+        cost += 36 * mergeCost;
       }
     }
 
@@ -966,6 +1057,16 @@ function buildSharedEdges(segments, stop = null) {
       cost += localWeight * localCost;
     }
 
+    for (const p of (comp.edgePrefs || [])) {
+      const idx = candidatePos.get(p.rid);
+      if (idx == null) continue;
+
+      const edgeDistance = p.side > 0 ? idx : ((n - 1) - idx);
+      const baseWeight = p.transition === "split" ? 96 : 82;
+      const strength = Math.max(1, Math.min(3, p.strength / 0.0012));
+      cost += (baseWeight * strength * edgeDistance);
+    }
+
     return cost;
   }
 
@@ -973,6 +1074,7 @@ function buildSharedEdges(segments, stop = null) {
     c.baseScores = computeBaseScores(c);
     c.candidates = generateCandidateOrders(c);
     c.boundaryTargets = buildLocalBoundaryTargets(c);
+    c.edgePrefs = buildBoundaryEdgePreferences(c);
   }
 
   const sortedByStop = components.slice().sort((a, b) => {
@@ -1095,6 +1197,143 @@ function buildSharedEdges(segments, stop = null) {
   return shared;
 }
 
+function pointKey(p) {
+  return `${snapCoord(p[0])},${snapCoord(p[1])}`;
+}
+
+function buildSharedLaneChains(sharedEdges) {
+  if (!Array.isArray(sharedEdges) || sharedEdges.length === 0) return [];
+
+  const groups = new Map();
+  for (const e of sharedEdges) {
+    const orderedIds = e.orderedRouteIds && e.orderedRouteIds.length
+      ? e.orderedRouteIds.slice()
+      : Array.from(e.routeIds).sort();
+    if (orderedIds.length < 2) continue;
+
+    const signature = orderedIds.join("|");
+    let arr = groups.get(signature);
+    if (!arr) {
+      arr = [];
+      groups.set(signature, arr);
+    }
+    arr.push({
+      edge: e,
+      orderedIds,
+      colors: orderedIds.map((rid) => e.colorByRoute.get(rid)),
+    });
+  }
+
+  const chains = [];
+
+  for (const items of groups.values()) {
+    const outByNode = new Map();
+    const inCount = new Map();
+    const outCount = new Map();
+
+    const addNodeIfMissing = (nk) => {
+      if (!inCount.has(nk)) inCount.set(nk, 0);
+      if (!outCount.has(nk)) outCount.set(nk, 0);
+    };
+
+    for (let i = 0; i < items.length; i += 1) {
+      const e = items[i].edge;
+      const a = e.drawA || e.a;
+      const b = e.drawB || e.b;
+      const ak = pointKey(a);
+      const bk = pointKey(b);
+
+      addNodeIfMissing(ak);
+      addNodeIfMissing(bk);
+
+      outCount.set(ak, (outCount.get(ak) || 0) + 1);
+      inCount.set(bk, (inCount.get(bk) || 0) + 1);
+
+      if (!outByNode.has(ak)) outByNode.set(ak, []);
+      outByNode.get(ak).push(i);
+    }
+
+    const visited = new Set();
+    const startNodes = [];
+    for (const nk of outByNode.keys()) {
+      const indeg = inCount.get(nk) || 0;
+      const outdeg = outCount.get(nk) || 0;
+      if (indeg !== 1 || outdeg !== 1) startNodes.push(nk);
+    }
+
+    const walkFromEdge = (startEdgeIdx) => {
+      if (visited.has(startEdgeIdx)) return;
+
+      const first = items[startEdgeIdx];
+      const points = [];
+      let currIdx = startEdgeIdx;
+
+      while (currIdx != null && !visited.has(currIdx)) {
+        visited.add(currIdx);
+        const it = items[currIdx];
+        const e = it.edge;
+        const a = e.drawA || e.a;
+        const b = e.drawB || e.b;
+
+        if (points.length === 0) points.push(a);
+        points.push(b);
+
+        const bk = pointKey(b);
+        const outs = (outByNode.get(bk) || []).filter((idx) => !visited.has(idx));
+        const indeg = inCount.get(bk) || 0;
+        const outdeg = outCount.get(bk) || 0;
+
+        if (outs.length === 1 && indeg === 1 && outdeg === 1) currIdx = outs[0];
+        else currIdx = null;
+      }
+
+      if (points.length >= 2) {
+        chains.push({
+          points,
+          orderedRouteIds: first.orderedIds.slice(),
+          colors: first.colors.slice(),
+        });
+      }
+    };
+
+    for (const nk of startNodes) {
+      const outs = outByNode.get(nk) || [];
+      for (const idx of outs) walkFromEdge(idx);
+    }
+
+    // Remaining edges are simple cycles (all nodes indeg=outdeg=1).
+    for (let i = 0; i < items.length; i += 1) walkFromEdge(i);
+  }
+
+  return chains;
+}
+
+function buildNonSharedRuns(points, sharedEdgeKeySet) {
+  if (!Array.isArray(points) || points.length < 2) return [];
+  if (!sharedEdgeKeySet || sharedEdgeKeySet.size === 0) return [points.slice()];
+
+  const runs = [];
+  let run = null;
+
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    const isShared = sharedEdgeKeySet.has(edgeKey(a, b));
+
+    if (isShared) {
+      if (run && run.length >= 2) runs.push(run);
+      run = null;
+      continue;
+    }
+
+    if (!run) run = [a, b];
+    else run.push(b);
+  }
+
+  if (run && run.length >= 2) runs.push(run);
+  return runs;
+}
+
 function drawStripedLineOnCanvas(ctx, x1, y1, x2, y2, colors, width) {
   if (!colors || colors.length === 0) return;
   const dx = x2 - x1;
@@ -1153,6 +1392,73 @@ function drawStripedLineOnMap(layer, mapObj, a, b, colors, width) {
       weight: laneWidth,
       opacity: 1,
       lineCap: "round",
+    }).addTo(layer);
+  }
+}
+
+function drawStripedPolylineOnCanvas(ctx, pixelPoints, colors, width, options = {}) {
+  if (!Array.isArray(pixelPoints) || pixelPoints.length < 2 || !colors || colors.length === 0) return;
+  const lineCap = options.lineCap || "round";
+  if (colors.length === 1) {
+    ctx.strokeStyle = colors[0];
+    ctx.lineWidth = width;
+    ctx.lineCap = lineCap;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    for (let i = 0; i < pixelPoints.length; i += 1) {
+      const p = pixelPoints[i];
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+    return;
+  }
+
+  const laneStep = Math.max(2, width / colors.length);
+  const laneWidth = Math.max(2, laneStep - 0.4);
+  for (let i = 0; i < colors.length; i += 1) {
+    const off = ((((colors.length - 1) / 2) - i) * laneStep);
+    const shifted = offsetPolylinePixels(pixelPoints, off);
+    if (shifted.length < 2) continue;
+
+    ctx.strokeStyle = colors[i];
+    ctx.lineWidth = laneWidth;
+    ctx.lineCap = lineCap;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    for (let p = 0; p < shifted.length; p += 1) {
+      if (p === 0) ctx.moveTo(shifted[p].x, shifted[p].y);
+      else ctx.lineTo(shifted[p].x, shifted[p].y);
+    }
+    ctx.stroke();
+  }
+}
+
+function drawStripedPolylineOnMap(layer, mapObj, points, colors, width, options = {}) {
+  if (!Array.isArray(points) || points.length < 2 || !colors || colors.length === 0) return;
+  const lineCap = options.lineCap || "round";
+  if (colors.length === 1) {
+    L.polyline(points, {
+      color: colors[0],
+      weight: width,
+      opacity: 1,
+      lineCap,
+      lineJoin: "round",
+    }).addTo(layer);
+    return;
+  }
+
+  const laneStep = Math.max(2, width / colors.length);
+  const laneWidth = Math.max(2, laneStep - 0.4);
+  for (let i = 0; i < colors.length; i += 1) {
+    const off = ((((colors.length - 1) / 2) - i) * laneStep);
+    const lane = offsetLatLonPolylineForMap(mapObj, points, off);
+    L.polyline(lane, {
+      color: colors[i],
+      weight: laneWidth,
+      opacity: 1,
+      lineCap,
+      lineJoin: "round",
     }).addTo(layer);
   }
 }
@@ -1315,34 +1621,38 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
 
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
   const sharedEdges = buildSharedEdges(segments, stop);
+  const sharedChains = buildSharedLaneChains(sharedEdges);
+  const sharedEdgeKeySet = new Set(sharedEdges.map((e) => e.key));
 
   for (const seg of segments) {
-    const pixelPoints = seg.points.map(([lat, lon]) => {
+    const runs = buildNonSharedRuns(seg.points, sharedEdgeKeySet);
+    for (const run of runs) {
+      const pixelPoints = run.map(([lat, lon]) => {
+        const [px, py] = project(lat, lon);
+        return { x: px, y: py };
+      });
+      if (pixelPoints.length < 2) continue;
+
+      ctx.strokeStyle = seg.lineColor;
+      ctx.lineWidth = 5;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      for (let i = 0; i < pixelPoints.length; i += 1) {
+        const p = pixelPoints[i];
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+  }
+
+  for (const chain of sharedChains) {
+    const pixelPoints = chain.points.map(([lat, lon]) => {
       const [px, py] = project(lat, lon);
       return { x: px, y: py };
     });
-
-    ctx.strokeStyle = seg.lineColor;
-    ctx.lineWidth = 5;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    for (let i = 0; i < pixelPoints.length; i += 1) {
-      const p = pixelPoints[i];
-      if (i === 0) ctx.moveTo(p.x, p.y);
-      else ctx.lineTo(p.x, p.y);
-    }
-    ctx.stroke();
-  }
-
-  for (const e of sharedEdges) {
-    const pa = e.drawA || e.a;
-    const pb = e.drawB || e.b;
-    const [x1, y1] = project(pa[0], pa[1]);
-    const [x2, y2] = project(pb[0], pb[1]);
-    const orderedIds = e.orderedRouteIds && e.orderedRouteIds.length ? e.orderedRouteIds : Array.from(e.routeIds).sort();
-    const colors = orderedIds.map((rid) => e.colorByRoute.get(rid));
-    drawStripedLineOnCanvas(ctx, x1, y1, x2, y2, colors, 5);
+    drawStripedPolylineOnCanvas(ctx, pixelPoints, chain.colors, 5, { lineCap: "butt" });
   }
 
   if (stopLat != null && stopLon != null) {
@@ -1474,6 +1784,8 @@ function drawRouteMapForStop(stop, items, maxRoutes) {
   const stopLon = safeParseFloat(stop.stop_lon);
   const segments = buildRouteSegmentsForStop(stop, items, maxRoutes);
   const sharedEdges = buildSharedEdges(segments, stop);
+  const sharedChains = buildSharedLaneChains(sharedEdges);
+  const sharedEdgeKeySet = new Set(sharedEdges.map((e) => e.key));
 
   if (stopLat != null && stopLon != null) {
     L.circleMarker([stopLat, stopLon], {
@@ -1500,16 +1812,19 @@ function drawRouteMapForStop(stop, items, maxRoutes) {
   }
 
   for (const seg of segments) {
-    L.polyline(seg.points, {
-      color: seg.lineColor,
-      weight: 4,
-      opacity: 0.9,
-    }).addTo(modalRouteLayer);
+    const runs = buildNonSharedRuns(seg.points, sharedEdgeKeySet);
+    for (const run of runs) {
+      L.polyline(run, {
+        color: seg.lineColor,
+        weight: 4,
+        opacity: 0.9,
+        lineCap: "round",
+        lineJoin: "round",
+      }).addTo(modalRouteLayer);
+    }
   }
-  for (const e of sharedEdges) {
-    const orderedIds = e.orderedRouteIds && e.orderedRouteIds.length ? e.orderedRouteIds : Array.from(e.routeIds).sort();
-    const colors = orderedIds.map((rid) => e.colorByRoute.get(rid));
-    drawStripedLineOnMap(modalRouteLayer, modalMap, e.drawA || e.a, e.drawB || e.b, colors, 4);
+  for (const chain of sharedChains) {
+    drawStripedPolylineOnMap(modalRouteLayer, modalMap, chain.points, chain.colors, 4, { lineCap: "butt" });
   }
 
   if (segments.length === 0) {
@@ -1673,6 +1988,8 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   const shown = items.slice(0, maxRoutes);
   const bounds = getRouteBounds(stop, routeSegments);
   const sharedEdges = buildSharedEdges(routeSegments, stop);
+  const sharedChains = buildSharedLaneChains(sharedEdges);
+  const sharedEdgeKeySet = new Set(sharedEdges.map((e) => e.key));
 
   const mapOuterX = pad;
   const mapOuterY = mapTop + 6;
@@ -1720,36 +2037,33 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
 
   const routePathSvg = [];
   for (const seg of routeSegments) {
-    if (!seg.points.length) continue;
-    const d = seg.points.map(([lat, lon], i) => {
-      const [x, y] = project(lat, lon);
-      return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    }).join(" ");
-    routePathSvg.push(`<path d="${d}" fill="none" stroke="${seg.lineColor}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />`);
+    const runs = buildNonSharedRuns(seg.points, sharedEdgeKeySet);
+    for (const run of runs) {
+      const d = run.map(([lat, lon], i) => {
+        const [x, y] = project(lat, lon);
+        return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+      }).join(" ");
+      routePathSvg.push(`<path d="${d}" fill="none" stroke="${seg.lineColor}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />`);
+    }
   }
 
   const sharedLaneSvg = [];
-  for (const e of sharedEdges) {
-    const pa = e.drawA || e.a;
-    const pb = e.drawB || e.b;
-    const [x1p, y1p] = project(pa[0], pa[1]);
-    const [x2p, y2p] = project(pb[0], pb[1]);
-    const orderedIds = e.orderedRouteIds && e.orderedRouteIds.length ? e.orderedRouteIds : Array.from(e.routeIds).sort();
-    const colors = orderedIds.map((rid) => e.colorByRoute.get(rid));
-    if (colors.length <= 1) continue;
+  for (const chain of sharedChains) {
+    if (!chain.colors || chain.colors.length <= 1 || chain.points.length < 2) continue;
 
-    const dx = x2p - x1p;
-    const dy = y2p - y1p;
-    const len = Math.hypot(dx, dy) || 1;
-    const nx = -dy / len;
-    const ny = dx / len;
-    const laneStep = Math.max(2, 5 / colors.length);
+    const pixelPoints = chain.points.map(([lat, lon]) => {
+      const [x, y] = project(lat, lon);
+      return { x, y };
+    });
+    const laneStep = Math.max(2, 5 / chain.colors.length);
     const laneWidth = Math.max(2, laneStep - 0.4);
-    for (let i = 0; i < colors.length; i += 1) {
-      const off = ((((colors.length - 1) / 2) - i) * laneStep);
-      const ox = nx * off;
-      const oy = ny * off;
-      sharedLaneSvg.push(`<line x1="${(x1p + ox).toFixed(2)}" y1="${(y1p + oy).toFixed(2)}" x2="${(x2p + ox).toFixed(2)}" y2="${(y2p + oy).toFixed(2)}" stroke="${colors[i]}" stroke-width="${laneWidth.toFixed(2)}" stroke-linecap="round" />`);
+
+    for (let i = 0; i < chain.colors.length; i += 1) {
+      const off = ((((chain.colors.length - 1) / 2) - i) * laneStep);
+      const shifted = offsetPolylinePixels(pixelPoints, off);
+      if (shifted.length < 2) continue;
+      const d = shifted.map((p, idx) => `${idx === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
+      sharedLaneSvg.push(`<path d="${d}" fill="none" stroke="${chain.colors[i]}" stroke-width="${laneWidth.toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round" />`);
     }
   }
 
