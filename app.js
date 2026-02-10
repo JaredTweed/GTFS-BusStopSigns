@@ -56,6 +56,8 @@ let selectedStop = null;
 let selectedStopRouteSummary = null;
 let signRenderToken = 0;
 const tileImageCache = new Map();
+let routeSummaryCache = new Map(); // `${stop_id}::${direction}` -> summary array
+let bootGeneration = 0;
 
 const MAP_LINE_PALETTE = [
   "#e63946", "#1d3557", "#2a9d8f", "#f4a261", "#6a4c93",
@@ -66,6 +68,7 @@ const MAP_TILE_LABELS_URL = "https://{s}.basemaps.cartocdn.com/rastertiles/voyag
 const MAP_TILE_SUBDOMAINS = "abcd";
 const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO";
 const SIGN_MAP_ZOOM_IN_STEPS = 1;
+const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 
 function setProgress(pct, text) {
   ui.progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
@@ -2100,6 +2103,79 @@ function computeRouteSummaryForStop(stop, directionFilter) {
   return items;
 }
 
+function routeSummaryCacheKey(stopId, directionFilter) {
+  return `${stopId}::${directionFilter}`;
+}
+
+function loadRouteSummaryCacheFromData(preloadData) {
+  if (!preloadData || typeof preloadData !== "object") return false;
+  const stopsObj = preloadData.stops;
+  if (!stopsObj || typeof stopsObj !== "object") return false;
+
+  const nextCache = new Map();
+  const directions = ["all", "0", "1"];
+  for (const [stopId, byDirection] of Object.entries(stopsObj)) {
+    if (!stopId || !byDirection || typeof byDirection !== "object") continue;
+    for (const dir of directions) {
+      const items = byDirection[dir];
+      if (!Array.isArray(items)) continue;
+      nextCache.set(routeSummaryCacheKey(stopId, dir), items);
+    }
+  }
+  if (nextCache.size === 0) return false;
+  routeSummaryCache = nextCache;
+  return true;
+}
+
+async function tryLoadPreloadedRouteSummaries() {
+  try {
+    const res = await fetch(PRELOADED_SUMMARY_URL, { cache: "no-cache" });
+    if (!res.ok) return false;
+    const preloadData = await res.json();
+    return loadRouteSummaryCacheFromData(preloadData);
+  } catch {
+    return false;
+  }
+}
+
+function getRouteSummaryForStop(stop, directionFilter) {
+  const key = routeSummaryCacheKey(stop.stop_id, directionFilter);
+  const cached = routeSummaryCache.get(key);
+  if (cached !== undefined) return cached;
+
+  const computed = computeRouteSummaryForStop(stop, directionFilter);
+  routeSummaryCache.set(key, computed);
+  return computed;
+}
+
+async function preloadRouteSummariesInBackground(generationAtStart, stopsList) {
+  const preloadDirections = ["all", "0", "1"];
+  const preloadTotal = Math.max(1, stopsList.length * preloadDirections.length);
+  let preloadDone = 0;
+
+  for (let i = 0; i < stopsList.length; i += 1) {
+    if (generationAtStart !== bootGeneration) return;
+    const stop = stopsList[i];
+    for (const dir of preloadDirections) {
+      const key = routeSummaryCacheKey(stop.stop_id, dir);
+      if (!routeSummaryCache.has(key)) {
+        routeSummaryCache.set(key, computeRouteSummaryForStop(stop, dir));
+      }
+      preloadDone += 1;
+    }
+
+    if (i % 50 === 0) {
+      // Yield to keep UI responsive and allow immediate interactions.
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  if (generationAtStart === bootGeneration) {
+    console.log(`Route summary preload complete (${niceInt(preloadDone)}/${niceInt(preloadTotal)}).`);
+  }
+}
+
 async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken }) {
   const canvas = ui.signCanvas;
   const ctx = canvas.getContext("2d");
@@ -2347,7 +2423,7 @@ function openStop(stop) {
   const renderToken = ++signRenderToken;
 
   openModal();
-  selectedStopRouteSummary = computeRouteSummaryForStop(stop, directionFilter);
+  selectedStopRouteSummary = getRouteSummaryForStop(stop, directionFilter);
   const debugSegments = buildRouteSegmentsForStop(stop, selectedStopRouteSummary, maxRoutes);
   const overlapEvents = [];
   const overlapOrder = [];
@@ -2408,7 +2484,7 @@ ui.downloadSvgBtn.addEventListener("click", () => {
 
   const directionFilter = ui.directionSelect.value || "all";
   const maxRoutes = Math.max(4, Math.min(20, parseInt(ui.maxRoutes.value || "6", 10)));
-  const items = computeRouteSummaryForStop(stop, directionFilter);
+  const items = getRouteSummaryForStop(stop, directionFilter);
   const svg = buildSignSvg({ stop, items, directionFilter, maxRoutes });
 
   const name = (stop.stop_name || "bus_stop").toString().replace(/[^\w\-]+/g, "_").slice(0, 50);
@@ -2462,6 +2538,8 @@ ui.gtfsFile.addEventListener("change", async (e) => {
 });
 
 async function boot({ zipUrl, zipFile, zipName }) {
+  bootGeneration += 1;
+  const generationAtStart = bootGeneration;
   setProgress(2, "Loading GTFS zip…");
   ui.zipName.textContent = zipName;
 
@@ -2477,6 +2555,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
   hasServiceCalendarData = false;
   selectedStop = null;
   selectedStopRouteSummary = null;
+  routeSummaryCache = new Map();
 
   try {
     const zip = zipFile ? await loadZipFromFile(zipFile) : await loadZipFromUrl(zipUrl);
@@ -2549,6 +2628,20 @@ async function boot({ zipUrl, zipFile, zipName }) {
       console.warn("No shapes.txt found in GTFS feed; route map overlay will be unavailable.");
     }
 
+    const canUsePreloadedSummaries = !zipFile && zipName === "google_transit.zip";
+    if (canUsePreloadedSummaries) {
+      setProgress(50, "Loading precomputed route summaries…");
+      const loaded = await tryLoadPreloadedRouteSummaries();
+      if (loaded) {
+        ui.indexCount.textContent = "Preloaded";
+        setProgress(98, "Rendering stops on map…");
+        addStopsToMap();
+        setProgress(100, "Ready. Click a stop.");
+        console.log("Loaded with precomputed route summaries.");
+        return;
+      }
+    }
+
     // 5) stop_times.txt (large) -> build stop_id -> trip_id Set index
     setProgress(55, "Indexing stop_times.txt (stop -> trips)…");
     let rowCount = 0;
@@ -2589,6 +2682,9 @@ async function boot({ zipUrl, zipFile, zipName }) {
     addStopsToMap();
 
     setProgress(100, "Ready. Click a stop.");
+    setTimeout(() => {
+      void preloadRouteSummariesInBackground(generationAtStart, stops.slice());
+    }, 0);
     console.log("Loaded:", {
       stops: stops.length,
       routes: routesById.size,
