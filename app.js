@@ -558,9 +558,10 @@ function edgeKey(a, b) {
   return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
 }
 
-function buildSharedEdges(segments, stop = null) {
+function buildSharedEdges(segments, stop = null, options = {}) {
   const segmentByRouteId = new Map();
   for (const seg of segments) segmentByRouteId.set(seg.route_id, seg);
+  const traceOut = Array.isArray(options.traceOut) ? options.traceOut : null;
 
   const byEdge = new Map();
   for (const seg of segments) {
@@ -892,33 +893,14 @@ function buildSharedEdges(segments, stop = null) {
     return { nx, ny };
   }
 
-  function inversionDistance(orderA, orderB) {
-    const pos = new Map();
-    for (let i = 0; i < orderB.length; i += 1) pos.set(orderB[i], i);
-    const arr = orderA.filter((x) => pos.has(x));
-    let inv = 0;
-    for (let i = 0; i < arr.length; i += 1) {
-      for (let j = i + 1; j < arr.length; j += 1) {
-        if (pos.get(arr[i]) > pos.get(arr[j])) inv += 1;
-      }
-    }
-    return inv;
-  }
-
-  function permutations(arr) {
-    if (arr.length <= 1) return [arr.slice()];
-    const out = [];
-    for (let i = 0; i < arr.length; i += 1) {
-      const head = arr[i];
-      const tail = arr.slice(0, i).concat(arr.slice(i + 1));
-      const tailPerms = permutations(tail);
-      for (const p of tailPerms) out.push([head, ...p]);
-    }
-    return out;
-  }
-
   function orderKey(order) {
     return order.join("|");
+  }
+
+  function lineIdForRoute(routeId) {
+    const seg = segmentByRouteId.get(routeId);
+    const short = (seg?.route_short_name ?? "").toString().trim();
+    return short || String(routeId);
   }
 
   function computeBaseScores(comp) {
@@ -968,49 +950,32 @@ function buildSharedEdges(segments, stop = null) {
     return scores;
   }
 
-  function generateCandidateOrders(comp) {
-    const routeIds = comp.routeIds.slice();
-    const base = routeIds.slice().sort((a, b) => {
+  function baseOrderForComponent(comp) {
+    return comp.routeIds.slice().sort((a, b) => {
       const ds = (comp.baseScores.get(b) ?? 0) - (comp.baseScores.get(a) ?? 0);
       if (ds !== 0) return ds;
       return String(a).localeCompare(String(b));
     });
-    const n = routeIds.length;
-    if (n <= 8) return permutations(base);
+  }
 
-    const maxBeam = 320;
-    let beam = [base, routeIds.slice(), routeIds.slice().reverse()];
-    const seen = new Set();
-    beam = beam.filter((o) => {
-      const k = orderKey(o);
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
+  function applyEventToOrder(order, event) {
+    const idx = order.indexOf(event.rid);
+    if (idx < 0) return;
 
-    const target = base;
-    const iters = Math.min(8, n + 2);
-    for (let step = 0; step < iters; step += 1) {
-      const candMap = new Map();
-      for (const order of beam) {
-        candMap.set(orderKey(order), order);
-        for (let i = 0; i < order.length - 1; i += 1) {
-          const o = order.slice();
-          const t = o[i];
-          o[i] = o[i + 1];
-          o[i + 1] = t;
-          candMap.set(orderKey(o), o);
-        }
+    if (event.side === "L") {
+      for (let i = idx; i > 0; i -= 1) {
+        const t = order[i - 1];
+        order[i - 1] = order[i];
+        order[i] = t;
       }
-      const scored = Array.from(candMap.values()).map((o) => ({
-        order: o,
-        cost: inversionDistance(o, target),
-        key: orderKey(o),
-      }));
-      scored.sort((a, b) => (a.cost - b.cost) || a.key.localeCompare(b.key));
-      beam = scored.slice(0, maxBeam).map((x) => x.order);
+      return;
     }
-    return beam;
+
+    for (let i = idx; i < order.length - 1; i += 1) {
+      const t = order[i + 1];
+      order[i + 1] = order[i];
+      order[i] = t;
+    }
   }
 
   function preferredTransitionForBoundary(comp, nei) {
@@ -1028,31 +993,6 @@ function buildSharedEdges(segments, stop = null) {
     if (!obs) obs = routeBoundaryObservation(comp, rid, nodeKey, nx, ny, { requireOutside: true });
     if (!obs) obs = routeBoundaryObservation(comp, rid, nodeKey, nx, ny);
     return obs;
-  }
-
-  function compareBoundaryRouteOrder(comp, a, b, group, preferredTransition = null) {
-    const idxA = Number.isFinite(a.nodeIdx) ? a.nodeIdx : (Number.isFinite(a.idx) ? a.idx : Number.POSITIVE_INFINITY);
-    const idxB = Number.isFinite(b.nodeIdx) ? b.nodeIdx : (Number.isFinite(b.idx) ? b.idx : Number.POSITIVE_INFINITY);
-
-    if (preferredTransition) {
-      const aMatches = a.transition === preferredTransition;
-      const bMatches = b.transition === preferredTransition;
-      if (aMatches !== bMatches) return aMatches ? -1 : 1;
-      if (aMatches && idxA !== idxB) {
-        if (preferredTransition === "split") {
-          return group === "pos" ? (idxA - idxB) : (idxB - idxA);
-        }
-        return group === "pos" ? (idxB - idxA) : (idxA - idxB);
-      }
-    }
-
-    const aMag = Math.abs(a.side);
-    const bMag = Math.abs(b.side);
-    if (bMag !== aMag) return bMag - aMag;
-    if (idxA !== idxB) return idxA - idxB;
-    const ds = (comp.baseScores.get(b.rid) ?? 0) - (comp.baseScores.get(a.rid) ?? 0);
-    if (ds !== 0) return ds;
-    return String(a.rid).localeCompare(String(b.rid));
   }
 
   function boundaryInfoScore(comp, nei, nodeKey) {
@@ -1107,174 +1047,89 @@ function buildSharedEdges(segments, stop = null) {
     return candidates.slice(0, limit).map((x) => x.nodeKey);
   }
 
-  function expectedOrderFromNeighbor(comp, nei, nodeKey) {
-    const sharedOrdered = nei.order.filter((r) => comp.routeIds.includes(r));
-    const extras = comp.routeIds.filter((r) => !sharedOrdered.includes(r));
-    if (extras.length === 0) return sharedOrdered.slice();
-
-    const preferredTransition = preferredTransitionForBoundary(comp, nei);
-    const { nx, ny } = normalFromCompAtNode(nei, nodeKey, sharedOrdered);
-    const pos = [];
-    const neg = [];
-    const neutral = [];
-    for (const rid of extras) {
-      const obs = routeBoundaryObservationForNeighbor(comp, rid, nodeKey, nx, ny, preferredTransition);
-      if (!obs || !Number.isFinite(obs.side)) {
-        neutral.push(rid);
-        continue;
-      }
-      if (Math.abs(obs.side) < 1e-9) neutral.push(rid);
-      else if (obs.side > 0) pos.push({ rid, ...obs });
-      else neg.push({ rid, ...obs });
-    }
-
-    pos.sort((a, b) => compareBoundaryRouteOrder(comp, a, b, "pos", preferredTransition));
-    neg.sort((a, b) => compareBoundaryRouteOrder(comp, a, b, "neg", preferredTransition));
-
-    for (const rid of neutral) {
-      const bs = comp.baseScores.get(rid) ?? 0;
-      if (bs >= 0) pos.push({ rid, side: bs, transition: null, idx: Infinity, nodeIdx: Infinity, outside: false });
-      else neg.push({ rid, side: bs, transition: null, idx: Infinity, nodeIdx: Infinity, outside: false });
-    }
-    pos.sort((a, b) => compareBoundaryRouteOrder(comp, a, b, "pos", preferredTransition));
-    neg.sort((a, b) => compareBoundaryRouteOrder(comp, a, b, "neg", preferredTransition));
-
-    return [...pos.map((x) => x.rid), ...sharedOrdered, ...neg.map((x) => x.rid)];
-  }
-
-  function buildLocalBoundaryTargets(comp) {
-    const targets = [];
-    const byScore = (a, b) => {
-      const ds = (comp.baseScores.get(b) ?? 0) - (comp.baseScores.get(a) ?? 0);
-      if (ds !== 0) return ds;
-      return String(a).localeCompare(String(b));
-    };
-
-    for (const nodeKey of comp.nodeKeys) {
-      const { nx, ny } = normalFromCompAtNode(comp, nodeKey, comp.routeIds);
-      const known = [];
-      let strength = 0;
-
-      for (const rid of comp.routeIds) {
-        const obs = routeBoundaryObservation(comp, rid, nodeKey, nx, ny, { requireOutside: true });
-        if (!obs || !Number.isFinite(obs.side) || Math.abs(obs.side) < 1e-9) continue;
-        known.push({ rid, ...obs });
-        strength += Math.abs(obs.side);
-      }
-      if (known.length < 2) continue;
-
-      let splitCount = 0;
-      let mergeCount = 0;
-      for (const k of known) {
-        if (k.transition === "split") splitCount += 1;
-        else if (k.transition === "merge") mergeCount += 1;
-      }
-      const preferredTransition = splitCount === mergeCount
-        ? null
-        : (splitCount > mergeCount ? "split" : "merge");
-
-      const knownSet = new Set(known.map((x) => x.rid));
-      const pos = known
-        .filter((x) => x.side > 0)
-        .sort((a, b) => compareBoundaryRouteOrder(comp, a, b, "pos", preferredTransition));
-      const neg = known
-        .filter((x) => x.side < 0)
-        .sort((a, b) => compareBoundaryRouteOrder(comp, a, b, "neg", preferredTransition));
-      const unknown = comp.routeIds.filter((rid) => !knownSet.has(rid)).sort(byScore);
-      const order = [...pos.map((x) => x.rid), ...unknown, ...neg.map((x) => x.rid)];
-
-      if (preferredTransition) {
-        strength *= 1.2;
-      }
-      targets.push({ nodeKey, order, strength });
-    }
-
-    return targets;
-  }
-
-  function buildBoundaryEdgePreferences(comp) {
-    const prefs = [];
-    const seen = new Set();
+  function collectConstraintEvents(comp, neighborEntries) {
+    const raw = [];
     const eps = 1e-9;
 
-    for (const nodeKey of comp.nodeKeys) {
-      const { nx, ny } = normalFromCompAtNode(comp, nodeKey, comp.routeIds);
-      for (const rid of comp.routeIds) {
-        const obs = routeBoundaryObservation(comp, rid, nodeKey, nx, ny, { requireOutside: true });
-        if (!obs || !Number.isFinite(obs.side) || Math.abs(obs.side) < eps) continue;
-        if (obs.transition !== "split" && obs.transition !== "merge") continue;
+    for (const entry of neighborEntries) {
+      const nei = entry.nei;
+      const nodeKeys = Array.isArray(entry.nodeKeys) ? entry.nodeKeys : [];
+      if (!nei || nodeKeys.length === 0) continue;
 
-        const key = `${rid}|${nodeKey}|${obs.transition}|${Math.sign(obs.side)}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
+      const sharedOrdered = nei.order.filter((r) => comp.routeIds.includes(r));
+      const extras = comp.routeIds.filter((r) => !sharedOrdered.includes(r));
+      if (extras.length === 0) continue;
 
-        prefs.push({
-          rid,
-          nodeKey,
-          side: obs.side,
-          transition: obs.transition,
-          nodeIdx: Number.isFinite(obs.nodeIdx) ? obs.nodeIdx : Infinity,
-          strength: Math.abs(obs.side),
-        });
+      const preferredTransition = preferredTransitionForBoundary(comp, nei);
+      for (const nodeKey of nodeKeys) {
+        const { nx, ny } = normalFromCompAtNode(nei, nodeKey, sharedOrdered);
+        for (const rid of extras) {
+          const obs = routeBoundaryObservationForNeighbor(comp, rid, nodeKey, nx, ny, preferredTransition);
+          if (!obs || !Number.isFinite(obs.side) || Math.abs(obs.side) < eps) continue;
+
+          const transition = (obs.transition === "merge" || obs.transition === "split")
+            ? obs.transition
+            : (preferredTransition || "split");
+
+          raw.push({
+            rid,
+            side: obs.side > 0 ? "L" : "R",
+            op: transition === "merge" ? "M" : "S",
+            strength: Math.abs(obs.side),
+            nodeIdx: Number.isFinite(obs.nodeIdx) ? obs.nodeIdx : Infinity,
+          });
+        }
       }
     }
 
-    return prefs;
+    if (raw.length === 0) return [];
+
+    const byRoute = new Map();
+    for (const ev of raw) {
+      let rec = byRoute.get(ev.rid);
+      if (!rec) {
+        rec = {
+          rid: ev.rid,
+          left: 0,
+          right: 0,
+          split: 0,
+          merge: 0,
+          strength: 0,
+          firstNodeIdx: ev.nodeIdx,
+        };
+        byRoute.set(ev.rid, rec);
+      }
+      if (ev.side === "L") rec.left += ev.strength;
+      else rec.right += ev.strength;
+      if (ev.op === "M") rec.merge += ev.strength;
+      else rec.split += ev.strength;
+      rec.strength += ev.strength;
+      if (ev.nodeIdx < rec.firstNodeIdx) rec.firstNodeIdx = ev.nodeIdx;
+    }
+
+    return Array.from(byRoute.values())
+      .map((rec) => ({
+        rid: rec.rid,
+        side: rec.left >= rec.right ? "L" : "R",
+        op: rec.merge >= rec.split ? "M" : "S",
+        strength: rec.strength,
+        firstNodeIdx: rec.firstNodeIdx,
+      }))
+      .sort((a, b) => {
+        if (b.strength !== a.strength) return b.strength - a.strength;
+        if (a.firstNodeIdx !== b.firstNodeIdx) return a.firstNodeIdx - b.firstNodeIdx;
+        return String(a.rid).localeCompare(String(b.rid));
+      });
   }
 
-  function evaluateOrder(comp, candidate, knownNeighborEntries) {
-    const baseTarget = comp.routeIds.slice().sort((a, b) => {
-      const ds = (comp.baseScores.get(b) ?? 0) - (comp.baseScores.get(a) ?? 0);
-      if (ds !== 0) return ds;
-      return String(a).localeCompare(String(b));
-    });
-    let cost = 0.25 * inversionDistance(candidate, baseTarget);
-    const candidatePos = new Map();
-    for (let i = 0; i < candidate.length; i += 1) candidatePos.set(candidate[i], i);
-    const n = candidate.length;
-
-    for (const entry of knownNeighborEntries) {
-      const nei = entry.nei;
-      const neiShared = nei.order.filter((r) => comp.routeIds.includes(r));
-      const candShared = candidate.filter((r) => neiShared.includes(r));
-
-      const crossCost = inversionDistance(candShared, neiShared);
-      cost += 64 * crossCost;
-
-      const nodeKeys = Array.isArray(entry.nodeKeys) && entry.nodeKeys.length
-        ? entry.nodeKeys
-        : [];
-      for (const nodeKey of nodeKeys) {
-        const expected = expectedOrderFromNeighbor(comp, nei, nodeKey);
-        const mergeCost = inversionDistance(candidate, expected);
-        cost += 36 * mergeCost;
-      }
-    }
-
-    for (const t of (comp.boundaryTargets || [])) {
-      const localCost = inversionDistance(candidate, t.order);
-      const localWeight = 16 * Math.min(2.5, (t.strength / 0.0015));
-      cost += localWeight * localCost;
-    }
-
-    for (const p of (comp.edgePrefs || [])) {
-      const idx = candidatePos.get(p.rid);
-      if (idx == null) continue;
-
-      const edgeDistance = p.side > 0 ? idx : ((n - 1) - idx);
-      const baseWeight = p.transition === "split" ? 96 : 82;
-      const strength = Math.max(1, Math.min(3, p.strength / 0.0012));
-      cost += (baseWeight * strength * edgeDistance);
-    }
-
-    return cost;
+  function applyEventOrdering(initOrder, events) {
+    const order = initOrder.slice();
+    for (const ev of events) applyEventToOrder(order, ev);
+    return order;
   }
 
   for (const c of components) {
     c.baseScores = computeBaseScores(c);
-    c.candidates = generateCandidateOrders(c);
-    c.boundaryTargets = buildLocalBoundaryTargets(c);
-    c.edgePrefs = buildBoundaryEdgePreferences(c);
   }
 
   const sortedByStop = components.slice().sort((a, b) => {
@@ -1283,14 +1138,13 @@ function buildSharedEdges(segments, stop = null) {
     return a.id - b.id;
   });
 
-  // 2) Initial outward assignment from stop.
-  const assigned = new Set();
+  // 2) Initial assignment using split/merge side constraints from all neighbors.
   for (const comp of sortedByStop) {
+    const initOrder = baseOrderForComponent(comp);
     const neighborEntries = [];
     const nmap = adj.get(comp.id);
     if (nmap) {
       for (const [nid, nodeKeysSet] of nmap.entries()) {
-        if (!assigned.has(nid)) continue;
         const nei = compById.get(nid);
         if (!nei) continue;
         const nodeKeys = selectBoundaryNodes(comp, nei, nodeKeysSet);
@@ -1298,26 +1152,12 @@ function buildSharedEdges(segments, stop = null) {
         neighborEntries.push({ nei, nodeKeys });
       }
     }
-
-    const candidates = comp.candidates || [comp.order.slice()];
-    let best = comp.order;
-    let bestCost = Infinity;
-    let bestKey = orderKey(best);
-    for (const cand of candidates) {
-      const c = evaluateOrder(comp, cand, neighborEntries);
-      const k = orderKey(cand);
-      if (c < bestCost || (c === bestCost && k.localeCompare(bestKey) < 0)) {
-        best = cand;
-        bestCost = c;
-        bestKey = k;
-      }
-    }
-    comp.order = best.slice();
-    assigned.add(comp.id);
+    const events = collectConstraintEvents(comp, neighborEntries);
+    comp.order = applyEventOrdering(initOrder, events);
   }
 
-  // 3) Coordinate-descent refinement across all neighbors.
-  for (let pass = 0; pass < 8; pass += 1) {
+  // 3) Refine with all neighbors, still using event-bubble ordering.
+  for (let pass = 0; pass < 4; pass += 1) {
     let changed = false;
     const order = pass % 2 === 0 ? sortedByStop : sortedByStop.slice().reverse();
     for (const comp of order) {
@@ -1333,27 +1173,114 @@ function buildSharedEdges(segments, stop = null) {
         }
       }
       if (neighborEntries.length === 0) continue;
-
-      const candidates = comp.candidates || [comp.order.slice()];
-      let best = comp.order;
-      let bestCost = evaluateOrder(comp, comp.order, neighborEntries);
-      let bestKey = orderKey(comp.order);
-      for (const cand of candidates) {
-        const c = evaluateOrder(comp, cand, neighborEntries);
-        const k = orderKey(cand);
-        if (c < bestCost || (c === bestCost && k.localeCompare(bestKey) < 0)) {
-          best = cand;
-          bestCost = c;
-          bestKey = k;
-        }
-      }
-      if (orderKey(best) !== orderKey(comp.order)) {
-        comp.order = best.slice();
+      const events = collectConstraintEvents(comp, neighborEntries);
+      if (events.length === 0) continue;
+      const nextOrder = applyEventOrdering(comp.order, events);
+      if (orderKey(nextOrder) !== orderKey(comp.order)) {
+        comp.order = nextOrder;
         changed = true;
       }
     }
     if (!changed) break;
   }
+
+  function sideForIndex(idx, len) {
+    if (idx <= 0) return "L";
+    if (idx >= len - 1) return "R";
+    return idx < (len / 2) ? "L" : "R";
+  }
+
+  function buildTracePath() {
+    if (!components.length) return [];
+    const seed = sortedByStop
+      .slice()
+      .sort((a, b) => {
+        const da = compDist2Stop(a);
+        const db = compDist2Stop(b);
+        if (da !== db) return da - db;
+        if (b.order.length !== a.order.length) return b.order.length - a.order.length;
+        return a.id - b.id;
+      })[0];
+    if (!seed) return [];
+
+    const path = [seed];
+    const visited = new Set([seed.id]);
+    let cur = seed;
+    const eps = 1e-12;
+
+    while (true) {
+      const nmap = adj.get(cur.id);
+      if (!nmap || nmap.size === 0) break;
+      const curDist = compDist2Stop(cur);
+      let best = null;
+      let bestScore = -Infinity;
+
+      for (const nid of nmap.keys()) {
+        if (visited.has(nid)) continue;
+        const nei = compById.get(nid);
+        if (!nei) continue;
+        const overlap = cur.order.filter((r) => nei.routeIds.includes(r)).length;
+        if (overlap === 0) continue;
+        const neiDist = compDist2Stop(nei);
+        const outwardBonus = neiDist >= (curDist - eps) ? 2000 : 0;
+        const score = (overlap * 1000) + outwardBonus - Math.abs(neiDist - curDist);
+        if (score > bestScore) {
+          best = nei;
+          bestScore = score;
+        }
+      }
+
+      if (!best) break;
+      path.push(best);
+      visited.add(best.id);
+      cur = best;
+    }
+
+    return path;
+  }
+
+  function appendTraceEvents() {
+    if (!traceOut) return;
+    traceOut.length = 0;
+    const path = buildTracePath();
+    if (!path.length) return;
+
+    const firstOrder = path[0].order.slice();
+    traceOut.push({ init: firstOrder.map((rid) => lineIdForRoute(rid)) });
+
+    for (let i = 1; i < path.length; i += 1) {
+      const prev = path[i - 1];
+      const next = path[i];
+      const prevOrder = prev.order.slice();
+      const nextOrder = next.order.slice();
+
+      const splitRoutes = prevOrder.filter((rid) => !next.routeIds.includes(rid));
+      splitRoutes
+        .map((rid) => ({ rid, idx: prevOrder.indexOf(rid) }))
+        .sort((a, b) => a.idx - b.idx)
+        .forEach(({ rid, idx }) => {
+          traceOut.push({
+            id: lineIdForRoute(rid),
+            op: "S",
+            side: sideForIndex(idx, prevOrder.length),
+          });
+        });
+
+      const mergeRoutes = nextOrder.filter((rid) => !prev.routeIds.includes(rid));
+      mergeRoutes
+        .map((rid) => ({ rid, idx: nextOrder.indexOf(rid) }))
+        .sort((a, b) => a.idx - b.idx)
+        .forEach(({ rid, idx }) => {
+          traceOut.push({
+            id: lineIdForRoute(rid),
+            op: "M",
+            side: sideForIndex(idx, nextOrder.length),
+          });
+        });
+    }
+  }
+
+  appendTraceEvents();
 
   function edgeDirectionForRoute(edge, rid) {
     const seg = segmentByRouteId.get(rid);
@@ -1557,7 +1484,7 @@ function drawStripedLineOnCanvas(ctx, x1, y1, x2, y2, colors, width) {
   const laneWidth = Math.max(2, laneStep - 0.4);
 
   for (let i = 0; i < colors.length; i += 1) {
-    const off = ((((colors.length - 1) / 2) - i) * laneStep);
+    const off = ((i - ((colors.length - 1) / 2)) * laneStep);
     const ox = nx * off;
     const oy = ny * off;
     ctx.strokeStyle = colors[i];
@@ -1585,7 +1512,7 @@ function drawStripedLineOnMap(layer, mapObj, a, b, colors, width) {
   const laneStep = Math.max(2, width / colors.length);
   const laneWidth = Math.max(2, laneStep - 0.4);
   for (let i = 0; i < colors.length; i += 1) {
-    const off = ((((colors.length - 1) / 2) - i) * laneStep);
+    const off = ((i - ((colors.length - 1) / 2)) * laneStep);
     const lane = offsetLatLonPolylineForMap(mapObj, [a, b], off);
     L.polyline(lane, {
       color: colors[i],
@@ -1617,7 +1544,7 @@ function drawStripedPolylineOnCanvas(ctx, pixelPoints, colors, width, options = 
   const laneStep = Math.max(2, width / colors.length);
   const laneWidth = Math.max(2, laneStep - 0.4);
   for (let i = 0; i < colors.length; i += 1) {
-    const off = ((((colors.length - 1) / 2) - i) * laneStep);
+    const off = ((i - ((colors.length - 1) / 2)) * laneStep);
     const shifted = offsetPolylinePixels(pixelPoints, off);
     if (shifted.length < 2) continue;
 
@@ -1651,7 +1578,7 @@ function drawStripedPolylineOnMap(layer, mapObj, points, colors, width, options 
   const laneStep = Math.max(2, width / colors.length);
   const laneWidth = Math.max(2, laneStep - 0.4);
   for (let i = 0; i < colors.length; i += 1) {
-    const off = ((((colors.length - 1) / 2) - i) * laneStep);
+    const off = ((i - ((colors.length - 1) / 2)) * laneStep);
     const lane = offsetLatLonPolylineForMap(mapObj, points, off);
     L.polyline(lane, {
       color: colors[i],
@@ -2163,7 +2090,7 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
     const laneWidth = Math.max(2, laneStep - 0.4);
 
     for (let i = 0; i < chain.colors.length; i += 1) {
-      const off = ((((chain.colors.length - 1) / 2) - i) * laneStep);
+      const off = ((i - ((chain.colors.length - 1) / 2)) * laneStep);
       const shifted = offsetPolylinePixels(pixelPoints, off);
       if (shifted.length < 2) continue;
       const d = shifted.map((p, idx) => `${idx === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
@@ -2241,6 +2168,18 @@ function openStop(stop) {
 
   openModal();
   selectedStopRouteSummary = computeRouteSummaryForStop(stop, directionFilter);
+  const debugSegments = buildRouteSegmentsForStop(stop, selectedStopRouteSummary, maxRoutes);
+  const overlapEvents = [];
+  buildSharedEdges(debugSegments, stop, { traceOut: overlapEvents });
+  console.log("Shared route ordering events", {
+    stop_id: stop.stop_id,
+    stop_code: stop.stop_code || null,
+    stop_name: stop.stop_name || "",
+    direction_filter: directionFilter,
+    max_routes: maxRoutes,
+    events: overlapEvents,
+  });
+
   drawSign({
     stop,
     items: selectedStopRouteSummary,
