@@ -2461,7 +2461,7 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken, 
   ctx.textBaseline = "alphabetic";
 
   // Stop name / direction label
-  const subtitle = `${stop.stop_name || "—"} • ${directionFilter === "all" ? "All directions" : `Direction ${directionFilter}`}`;
+  const subtitle = `${stop.stop_name || "—"}`;
   ctx.fillStyle = "#666666";
   ctx.font = "600 22px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
   ctx.fillText(subtitle, pad, headerH);
@@ -2469,7 +2469,7 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken, 
   const routeSegments = buildRouteSegmentsForStop(stop, items, maxRoutes);
 
   // Route map preview (this is rendered into the PNG)
-  const mapTop = headerH + 24;
+  const mapTop = headerH + 30;
   const mapY = mapTop + 6;
   const footerY = H - 40;
   const mapHeight = Math.max(220, (footerY - mapY) - 18);
@@ -2491,7 +2491,7 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken, 
   // Footer
   ctx.fillStyle = "#888888";
   ctx.font = "600 16px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  ctx.fillText("Generated from GTFS • edit styles in app.js", pad, H - 40);
+  ctx.fillText("Generated from GTFS • Created by Jared Tweed", pad, H - 40);
 }
 
 function escXml(s) {
@@ -2512,7 +2512,7 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1
   const H = 1200;
   const pad = 50;
   const headerH = 170;
-  const mapTop = headerH + 24;
+  const mapTop = headerH + 30;
   const mapY = mapTop + 6;
   const footerY = H - 40;
 
@@ -2556,7 +2556,7 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
   const stopPt = (stopLat != null && stopLon != null) ? project(stopLat, stopLon) : null;
-  const subtitle = `${stop.stop_name || "—"} • ${directionFilter === "all" ? "All directions" : `Direction ${directionFilter}`}`;
+  const subtitle = `${stop.stop_name || "—"}`;
   const code = stop.stop_code ? `#${stop.stop_code}` : `#${stop.stop_id}`;
 
   const mapClipId = "mapClip";
@@ -2657,7 +2657,7 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1
   ${sharedLaneSvg.join("")}
   ${stopPt ? `<circle cx="${stopPt[0].toFixed(2)}" cy="${stopPt[1].toFixed(2)}" r="6" fill="#ffffff" stroke="#111111" stroke-width="2" />` : ""}
   ${legendSvg.join("")}
-  <text x="${pad}" y="${H - 40}" fill="#888888" font-size="16" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Generated from GTFS • edit styles in app.js</text>
+  <text x="${pad}" y="${H - 40}" fill="#888888" font-size="16" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Generated from GTFS • Created by Jared Tweed</text>
 </svg>`;
 }
 
