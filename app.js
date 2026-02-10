@@ -2,7 +2,7 @@
 /**
  * GTFS Bus Stop Map + Sign Generator (static site)
  * - Loads google_transit.zip (or user-selected zip)
- * - Parses: stops.txt, routes.txt, trips.txt, stop_times.txt, shapes.txt
+ * - Parses: stops.txt, routes.txt, trips.txt, stop_times.txt, shapes.txt, calendar*.txt
  * - Builds a stop_id -> [trip_id...] index (from stop_times)
  * - On stop click: compute routes serving that stop, grouped by direction/headsign
  * - Draws a clean printable sign to <canvas> and offers PNG download
@@ -43,10 +43,13 @@ let markerCluster;
 // GTFS data stores
 let stops = [];          // [{stop_id, stop_name, stop_lat, stop_lon, stop_code?}]
 let routesById = new Map(); // route_id -> {route_short_name, route_long_name, route_color, route_text_color}
-let tripsById = new Map();  // trip_id -> {route_id, direction_id, trip_headsign, shape_id}
+let tripsById = new Map();  // trip_id -> {route_id, direction_id, trip_headsign, shape_id, service_id}
 let stopToTrips = new Map();// stop_id -> Set(trip_id)
 let stopTripTimes = new Map();// stop_id -> Map(trip_id -> departure seconds)
 let shapesById = new Map(); // shape_id -> [[lat, lon], ...]
+let serviceActiveDatesLastWeekById = new Map(); // service_id -> Set(YYYYMMDD number)
+let lastWeekWeekdayByDateKey = new Map(); // YYYYMMDD number -> weekday index (0=Sun..6=Sat)
+let hasServiceCalendarData = false;
 
 // Selected stop
 let selectedStop = null;
@@ -85,6 +88,77 @@ function parseGtfsTimeToSeconds(v) {
   if (!Number.isFinite(h) || !Number.isFinite(mi) || !Number.isFinite(s)) return null;
   if (mi < 0 || mi > 59 || s < 0 || s > 59 || h < 0) return null;
   return (h * 3600) + (mi * 60) + s;
+}
+
+function dateToYmdKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return Number.parseInt(`${y}${m}${day}`, 10);
+}
+
+function parseGtfsDateKey(v) {
+  if (v == null) return null;
+  const raw = String(v).trim();
+  if (!/^\d{8}$/.test(raw)) return null;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+function getLast7DatesInfo() {
+  const today = new Date();
+  const base = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const out = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    const d = new Date(base);
+    d.setDate(base.getDate() - i);
+    out.push({ key: dateToYmdKey(d), weekday: d.getDay() });
+  }
+  return out;
+}
+
+function buildServiceActiveDatesLastWeek(calendarRows, calendarDateRows) {
+  const weekInfo = getLast7DatesInfo();
+  const weekKeys = new Set(weekInfo.map((x) => x.key));
+  lastWeekWeekdayByDateKey = new Map(weekInfo.map((x) => [x.key, x.weekday]));
+  const out = new Map();
+
+  const weekdayCols = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+
+  for (const row of calendarRows || []) {
+    const sid = row.service_id;
+    if (!sid) continue;
+    const start = parseGtfsDateKey(row.start_date);
+    const end = parseGtfsDateKey(row.end_date);
+    if (start == null || end == null) continue;
+    for (const w of weekInfo) {
+      if (w.key < start || w.key > end) continue;
+      const col = weekdayCols[w.weekday];
+      if (String(row[col] || "0").trim() !== "1") continue;
+      let set = out.get(sid);
+      if (!set) {
+        set = new Set();
+        out.set(sid, set);
+      }
+      set.add(w.key);
+    }
+  }
+
+  for (const row of calendarDateRows || []) {
+    const sid = row.service_id;
+    const key = parseGtfsDateKey(row.date);
+    const exType = String(row.exception_type || "").trim();
+    if (!sid || key == null || !weekKeys.has(key)) continue;
+    let set = out.get(sid);
+    if (!set) {
+      set = new Set();
+      out.set(sid, set);
+    }
+    if (exType === "1") set.add(key);
+    else if (exType === "2") set.delete(key);
+  }
+
+  return out;
 }
 
 function formatClockTimeFromSeconds(sec) {
@@ -152,6 +226,68 @@ function buildActiveHoursText(timesSec = []) {
   if (sorted.length === 0) return "";
   if (sorted.length === 1) return `${formatClockTimeFromSeconds(sorted[0])}`;
   return `${formatClockTimeFromSeconds(sorted[0])}-${formatClockTimeFromSeconds(sorted[sorted.length - 1])}`;
+}
+
+function dayGroupKeyFromWeekday(weekday) {
+  if (weekday === 0) return "sun";
+  if (weekday === 6) return "sat";
+  return "monfri";
+}
+
+function buildGroupedActiveHoursText(timesByGroup, fallbackTimes = []) {
+  const groups = timesByGroup || {};
+  const ordered = [
+    { key: "monfri", label: "Mon-Fri" },
+    { key: "sat", label: "Sat" },
+    { key: "sun", label: "Sun" },
+  ];
+  const parts = [];
+  for (const g of ordered) {
+    const range = buildActiveHoursText(groups[g.key] || []);
+    if (!range) continue;
+    parts.push(`${g.label} (${range})`);
+  }
+  if (parts.length > 0) return parts.join(", ");
+  const fallback = buildActiveHoursText(fallbackTimes);
+  return fallback ? `All days (${fallback})` : "";
+}
+
+function splitTextByMaxChars(text, maxChars) {
+  const src = String(text || "").trim();
+  if (!src) return [];
+  const words = src.split(/\s+/);
+  const out = [];
+  let line = "";
+  for (const w of words) {
+    if (!line) {
+      line = w;
+      continue;
+    }
+    if ((line.length + 1 + w.length) <= maxChars) {
+      line += ` ${w}`;
+    } else {
+      out.push(line);
+      line = w;
+    }
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+function buildLegendLinesForSegment(seg, maxChars = 86) {
+  const route = (seg?.route_short_name || "Route").toString().trim();
+  const active = (seg?.active_hours_text || "").toString().trim();
+  if (!active) return splitTextByMaxChars(route, maxChars);
+  return splitTextByMaxChars(`${route} ${active}`.trim(), maxChars);
+}
+
+function estimateLegendHeight(segments, maxSegments = 6) {
+  const use = (segments || []).slice(0, maxSegments);
+  let lineCount = 0;
+  for (const seg of use) lineCount += Math.max(1, buildLegendLinesForSegment(seg).length);
+  const perLine = 16;
+  const itemGap = 2;
+  return Math.max(56, 10 + (lineCount * perLine) + (Math.max(0, use.length - 1) * itemGap));
 }
 
 function parseCSVFromZip(zip, filename, { stepRow, complete } = {}) {
@@ -1667,7 +1803,7 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
   }
 
   const pad = 18;
-  const legendH = 56;
+  const legendH = Math.min(220, estimateLegendHeight(segments, 6));
   const drawX = x + pad;
   const drawY = y + pad;
   const drawW = w - (pad * 2);
@@ -1730,31 +1866,26 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
     ctx.stroke();
   }
 
-  let legendX = x + 14;
-  let legendRow = 0;
-  const legendRowH = 18;
-  const legendRows = 2;
-  const legendTop = y + h - (legendRows * legendRowH) - 4;
+  const legendX = x + 14;
+  const lineH = 16;
+  const itemGap = 2;
+  let legendY = y + h - legendH + 16;
   ctx.font = "700 12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
   for (const seg of segments.slice(0, 6)) {
-    const routeLabel = seg.route_short_name || "Route";
-    const rawLabel = seg.active_hours_text ? `${routeLabel} (${seg.active_hours_text})` : routeLabel;
-    const label = rawLabel.length > 46 ? `${rawLabel.slice(0, 43)}...` : rawLabel;
+    const lines = buildLegendLinesForSegment(seg);
+    const first = lines[0] || (seg.route_short_name || "Route");
     const swatchW = 18;
-    const textW = ctx.measureText(label).width;
-    const blockW = swatchW + 8 + textW + 12;
-    if (legendX + blockW > x + w - 10) {
-      legendRow += 1;
-      if (legendRow >= legendRows) break;
-      legendX = x + 14;
-    }
-    const legendY = legendTop + (legendRow * legendRowH) + 12;
-
     ctx.fillStyle = seg.lineColor;
     roundRect(ctx, legendX, legendY - 10, swatchW, 5, 2, true, false);
     ctx.fillStyle = "#222222";
-    ctx.fillText(label, legendX + swatchW + 8, legendY);
-    legendX += blockW;
+    ctx.fillText(first, legendX + swatchW + 8, legendY);
+    legendY += lineH;
+    for (let i = 1; i < lines.length; i += 1) {
+      ctx.fillText(lines[i], legendX + swatchW + 8, legendY);
+      legendY += lineH;
+    }
+    legendY += itemGap;
+    if (legendY > y + h - 4) break;
   }
 }
 
@@ -1763,12 +1894,14 @@ function computeRouteSummaryForStop(stop, directionFilter) {
   if (!tripSet || tripSet.size === 0) return [];
   const tripTimesForStop = stopTripTimes.get(stop.stop_id) || new Map();
 
-  // key -> {route_id, direction_id, count, shapeCounts, headsignCounts, times}
+  // key -> {route_id, direction_id, count, shapeCounts, headsignCounts, times, timesByGroup}
   const agg = new Map();
 
   for (const tripId of tripSet) {
     const t = tripsById.get(tripId);
     if (!t) continue;
+    const serviceDates = serviceActiveDatesLastWeekById.get(t.service_id);
+    if (hasServiceCalendarData && (!serviceDates || serviceDates.size === 0)) continue;
 
     const dir = (t.direction_id === "" || t.direction_id == null) ? null : String(t.direction_id);
     if (directionFilter !== "all" && String(dir) !== String(directionFilter)) continue;
@@ -1785,6 +1918,7 @@ function computeRouteSummaryForStop(stop, directionFilter) {
       shapeCounts: new Map(),
       headsignCounts: new Map(),
       times: [],
+      timesByGroup: { monfri: [], sat: [], sun: [] },
     };
     cur.count += 1;
     if (t.shape_id) {
@@ -1796,7 +1930,19 @@ function computeRouteSummaryForStop(stop, directionFilter) {
       cur.headsignCounts.set(headsign, prev + 1);
     }
     const depSec = tripTimesForStop.get(tripId);
-    if (depSec != null) cur.times.push(depSec);
+    if (depSec != null) {
+      if (serviceDates && serviceDates.size > 0) {
+        for (const dateKey of serviceDates) {
+          const weekday = lastWeekWeekdayByDateKey.get(dateKey);
+          if (weekday == null) continue;
+          cur.times.push(depSec);
+          const groupKey = dayGroupKeyFromWeekday(weekday);
+          cur.timesByGroup[groupKey].push(depSec);
+        }
+      } else {
+        cur.times.push(depSec);
+      }
+    }
     agg.set(k, cur);
   }
 
@@ -1831,7 +1977,7 @@ function computeRouteSummaryForStop(stop, directionFilter) {
       route_short_name: shortName,
       route_color: normalizeColor(r?.route_color, "#3b82f6"),
       frequency_windows: windows,
-      active_hours_text: buildActiveHoursText(x.times),
+      active_hours_text: buildGroupedActiveHoursText(x.timesByGroup, x.times),
     };
   });
 
@@ -1942,6 +2088,7 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   const footerY = H - 40;
 
   const routeSegments = buildRouteSegmentsForStop(stop, items, maxRoutes);
+  const legendH = Math.min(220, estimateLegendHeight(routeSegments, 6));
   const mapHeight = Math.max(220, (footerY - mapY) - 18);
   const bounds = getRouteBounds(stop, routeSegments);
   const sharedEdges = buildSharedEdges(routeSegments, stop);
@@ -1953,11 +2100,11 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   const mapOuterW = W - (pad * 2);
   const mapOuterH = mapHeight;
   const mapInnerPad = 18;
-  const legendH = 56;
+  const legendHForMap = legendH;
   const drawX = mapOuterX + mapInnerPad;
   const drawY = mapOuterY + mapInnerPad;
   const drawW = mapOuterW - (mapInnerPad * 2);
-  const drawH = mapOuterH - (mapInnerPad * 2) - legendH;
+  const drawH = mapOuterH - (mapInnerPad * 2) - legendHForMap;
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
 
   const zoom = chooseMapZoom(bounds, drawW, drawH);
@@ -2025,25 +2172,22 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   }
 
   const legendSvg = [];
-  let legendX = mapOuterX + 14;
-  let legendRow = 0;
-  const legendRows = 2;
-  const legendRowH = 18;
-  const legendTop = mapOuterY + mapOuterH - (legendRows * legendRowH) - 4;
+  const legendX = mapOuterX + 14;
+  const lineH = 16;
+  const itemGap = 2;
+  let legendY = mapOuterY + mapOuterH - legendHForMap + 16;
   for (const seg of routeSegments.slice(0, 6)) {
-    const routeLabel = seg.route_short_name || "Route";
-    const rawLabel = seg.active_hours_text ? `${routeLabel} (${seg.active_hours_text})` : routeLabel;
-    const label = rawLabel.length > 46 ? `${rawLabel.slice(0, 43)}...` : rawLabel;
-    const estW = (label.length * 7) + 38;
-    if (legendX + estW > mapOuterX + mapOuterW - 10) {
-      legendRow += 1;
-      if (legendRow >= legendRows) break;
-      legendX = mapOuterX + 14;
-    }
-    const legendY = legendTop + (legendRow * legendRowH) + 12;
+    const lines = buildLegendLinesForSegment(seg);
+    const first = lines[0] || (seg.route_short_name || "Route");
     legendSvg.push(`<rect x="${legendX.toFixed(2)}" y="${(legendY - 10).toFixed(2)}" width="18" height="5" rx="2" fill="${seg.lineColor}" />`);
-    legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(label)}</text>`);
-    legendX += estW;
+    legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(first)}</text>`);
+    legendY += lineH;
+    for (let i = 1; i < lines.length; i += 1) {
+      legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(lines[i])}</text>`);
+      legendY += lineH;
+    }
+    legendY += itemGap;
+    if (legendY > mapOuterY + mapOuterH - 4) break;
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -2207,6 +2351,9 @@ async function boot({ zipUrl, zipFile, zipName }) {
   stopToTrips = new Map();
   stopTripTimes = new Map();
   shapesById = new Map();
+  serviceActiveDatesLastWeekById = new Map();
+  lastWeekWeekdayByDateKey = new Map();
+  hasServiceCalendarData = false;
   selectedStop = null;
   selectedStopRouteSummary = null;
 
@@ -2233,9 +2380,24 @@ async function boot({ zipUrl, zipFile, zipName }) {
         direction_id: (t.direction_id ?? "").toString(),
         trip_headsign: t.trip_headsign ?? "",
         shape_id: (t.shape_id ?? "").toString(),
+        service_id: (t.service_id ?? "").toString(),
       });
     }
     ui.tripsCount.textContent = niceInt(tripsById.size);
+
+    // 3b) service calendar in the last 7 days
+    let calendarRows = [];
+    let calendarDateRows = [];
+    if (zip.file("calendar.txt")) {
+      calendarRows = await parseCSVFromZip(zip, "calendar.txt");
+    }
+    if (zip.file("calendar_dates.txt")) {
+      calendarDateRows = await parseCSVFromZip(zip, "calendar_dates.txt");
+    }
+    hasServiceCalendarData = calendarRows.length > 0 || calendarDateRows.length > 0;
+    if (hasServiceCalendarData) {
+      serviceActiveDatesLastWeekById = buildServiceActiveDatesLastWeek(calendarRows, calendarDateRows);
+    }
 
     // 4) shapes.txt (optional) -> shape_id -> ordered [lat,lon] path
     if (zip.file("shapes.txt")) {
