@@ -935,7 +935,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     return best;
   }
 
-  function normalFromCompAtNode(comp, nodeKey, routeHint) {
+  function normalFromCompAtNode(comp, nodeKey, routeHint, preferredBoundaryTransition = null) {
     const node = comp.nodeCoords.get(nodeKey);
     if (!node) return { nx: 0, ny: 1 };
 
@@ -946,9 +946,19 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     let tx = 0;
     let ty = 0;
     let count = 0;
+    const transitionForContext = (ctx) => {
+      if (ctx.prevInComp && !ctx.nextInComp) return "split";
+      if (!ctx.prevInComp && ctx.nextInComp) return "merge";
+      return "inside";
+    };
+
     for (const rid of candidates) {
       const contexts = collectRouteNodeContexts(comp, rid, nodeKey);
       for (const ctx of contexts) {
+        if (preferredBoundaryTransition) {
+          const tr = transitionForContext(ctx);
+          if (tr !== preferredBoundaryTransition) continue;
+        }
         // Directions are kept "from stop onward" so idx always increases downstream.
         if (ctx.prevInComp && ctx.prev) {
           tx += (ctx.curr[1] - ctx.prev[1]);
@@ -964,6 +974,10 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     }
 
     if (count === 0) {
+      if (preferredBoundaryTransition) {
+        // Fall back to unrestricted contexts if no preferred-transition vectors exist.
+        return normalFromCompAtNode(comp, nodeKey, routeHint, null);
+      }
       let anchor = null;
       for (const rid of candidates) {
         anchor = routePointNearNode(comp, rid, nodeKey, true) || routePointNearNode(comp, rid, nodeKey);
@@ -1387,7 +1401,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
 
       nodeCandidates.sort((a, b) => b.splitNodeIdx - a.splitNodeIdx);
       const bestNode = nodeCandidates[0].nodeKey;
-      const { nx, ny } = normalFromCompAtNode(comp, bestNode, comp.routeIds);
+      const { nx, ny } = normalFromCompAtNode(comp, bestNode, comp.routeIds, "split");
 
       let obs = routeBoundaryObservation(comp, rid, bestNode, nx, ny, { requireOutside: true, preferredTransition: "split" });
       if (!obs) obs = routeBoundaryObservation(comp, rid, bestNode, nx, ny, { requireOutside: true });
@@ -1397,8 +1411,98 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     }
 
     function terminalSplitSideByRank(comp, routeIds) {
-      const nodeCandidates = [];
+      function chooseBestTerminalSplitNode(routeIdsForNode) {
+        const nodeStats = new Map();
+        for (const rid of routeIdsForNode) {
+          const seenNodesForRoute = new Set();
+          for (const nodeKey of comp.nodeCoords.keys()) {
+            const contexts = collectRouteNodeContexts(comp, rid, nodeKey);
+            if (!contexts.length) continue;
+            const splitNodeIdx = contexts
+              .filter((ctx) => ctx.prevInComp && !ctx.nextInComp)
+              .reduce((m, ctx) => Math.max(m, ctx.idx), -Infinity);
+            if (!Number.isFinite(splitNodeIdx)) continue;
+            if (seenNodesForRoute.has(nodeKey)) continue;
+            seenNodesForRoute.add(nodeKey);
+            let stat = nodeStats.get(nodeKey);
+            if (!stat) {
+              stat = { nodeKey, routeCount: 0, maxSplitNodeIdx: -Infinity };
+              nodeStats.set(nodeKey, stat);
+            }
+            stat.routeCount += 1;
+            if (splitNodeIdx > stat.maxSplitNodeIdx) stat.maxSplitNodeIdx = splitNodeIdx;
+          }
+        }
+        const candidates = Array.from(nodeStats.values());
+        if (!candidates.length) return null;
+        candidates.sort((a, b) => {
+          if (b.routeCount !== a.routeCount) return b.routeCount - a.routeCount;
+          return b.maxSplitNodeIdx - a.maxSplitNodeIdx;
+        });
+        return candidates[0].nodeKey;
+      }
+
+      function terminalSplitSideByTurn(routeIdsForTurn) {
+        if (!Array.isArray(routeIdsForTurn) || routeIdsForTurn.length < 2) return null;
+        const nodeKey = chooseBestTerminalSplitNode(routeIdsForTurn);
+        if (!nodeKey) return null;
+
+        const splitContextsByRoute = new Map();
+        for (const rid of routeIdsForTurn) {
+          const contexts = collectRouteNodeContexts(comp, rid, nodeKey)
+            .filter((ctx) => ctx.prevInComp && !ctx.nextInComp && ctx.prev && ctx.next);
+          if (!contexts.length) continue;
+          contexts.sort((a, b) => b.idx - a.idx);
+          splitContextsByRoute.set(rid, contexts[0]);
+        }
+        if (splitContextsByRoute.size < 2) return null;
+
+        let ux = 0;
+        let uy = 0;
+        let uCount = 0;
+        for (const ctx of splitContextsByRoute.values()) {
+          ux += (ctx.curr[1] - ctx.prev[1]);
+          uy += (ctx.curr[0] - ctx.prev[0]);
+          uCount += 1;
+        }
+        if (uCount === 0) return null;
+        ux /= uCount;
+        uy /= uCount;
+        const uLen = Math.hypot(ux, uy);
+        if (!Number.isFinite(uLen) || uLen < 1e-12) return null;
+
+        const turns = [];
+        for (const [rid, ctx] of splitContextsByRoute.entries()) {
+          const vx = ctx.next[1] - ctx.curr[1];
+          const vy = ctx.next[0] - ctx.curr[0];
+          const vLen = Math.hypot(vx, vy);
+          if (!Number.isFinite(vLen) || vLen < 1e-12) continue;
+          const cross = ((ux * vy) - (uy * vx)) / (uLen * vLen);
+          turns.push({ rid, turn: cross });
+        }
+        if (turns.length < 2) return null;
+
+        // Positive cross product = left turn in lon/lat (x=east, y=north).
+        turns.sort((a, b) => {
+          const dt = b.turn - a.turn;
+          if (dt !== 0) return dt;
+          return String(a.rid).localeCompare(String(b.rid));
+        });
+
+        const out = new Map();
+        const n = turns.length;
+        for (let i = 0; i < n; i += 1) {
+          out.set(turns[i].rid, i < (n / 2) ? "L" : "R");
+        }
+        return out;
+      }
+
+      const turnSides = terminalSplitSideByTurn(routeIds);
+      if (turnSides) return turnSides;
+
+      const nodeStats = new Map();
       for (const rid of routeIds) {
+        const seenNodesForRoute = new Set();
         for (const nodeKey of comp.nodeCoords.keys()) {
           const contexts = collectRouteNodeContexts(comp, rid, nodeKey);
           if (!contexts.length) continue;
@@ -1406,14 +1510,26 @@ function buildSharedEdges(segments, stop = null, options = {}) {
             .filter((ctx) => ctx.prevInComp && !ctx.nextInComp)
             .reduce((m, ctx) => Math.max(m, ctx.idx), -Infinity);
           if (!Number.isFinite(splitNodeIdx)) continue;
-          nodeCandidates.push({ nodeKey, splitNodeIdx });
+          if (seenNodesForRoute.has(nodeKey)) continue;
+          seenNodesForRoute.add(nodeKey);
+          let stat = nodeStats.get(nodeKey);
+          if (!stat) {
+            stat = { nodeKey, routeCount: 0, maxSplitNodeIdx: -Infinity };
+            nodeStats.set(nodeKey, stat);
+          }
+          stat.routeCount += 1;
+          if (splitNodeIdx > stat.maxSplitNodeIdx) stat.maxSplitNodeIdx = splitNodeIdx;
         }
       }
+      const nodeCandidates = Array.from(nodeStats.values());
       if (!nodeCandidates.length) return null;
 
-      nodeCandidates.sort((a, b) => b.splitNodeIdx - a.splitNodeIdx);
+      nodeCandidates.sort((a, b) => {
+        if (b.routeCount !== a.routeCount) return b.routeCount - a.routeCount;
+        return b.maxSplitNodeIdx - a.maxSplitNodeIdx;
+      });
       const bestNode = nodeCandidates[0].nodeKey;
-      const { nx, ny } = normalFromCompAtNode(comp, bestNode, comp.routeIds);
+      const { nx, ny } = normalFromCompAtNode(comp, bestNode, comp.routeIds, "split");
 
       const observed = [];
       for (const rid of routeIds) {
