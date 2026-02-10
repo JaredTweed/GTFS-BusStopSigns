@@ -62,9 +62,10 @@ const MAP_LINE_PALETTE = [
   "#118ab2", "#ef476f", "#8ac926", "#ff7f11", "#3a86ff",
 ];
 const MAP_TILE_BASE_URL = "https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png";
-const MAP_TILE_LABELS_URL = "https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png";
+const MAP_TILE_LABELS_URL = "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png";
 const MAP_TILE_SUBDOMAINS = "abcd";
 const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO";
+const SIGN_MAP_ZOOM_IN_STEPS = 1;
 
 function setProgress(pct, text) {
   ui.progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
@@ -1766,14 +1767,22 @@ function getRouteBounds(stop, segments) {
 
 function chooseMapZoom(bounds, width, height) {
   const pad = 1.2;
-  for (let z = 19; z >= 0; z -= 1) {
+  const fitsAtZoom = (z) => {
     const a = latLonToWorld(bounds.minLat, bounds.minLon, z);
     const b = latLonToWorld(bounds.maxLat, bounds.maxLon, z);
     const spanX = Math.abs(b.x - a.x) * pad;
     const spanY = Math.abs(b.y - a.y) * pad;
-    if (spanX <= width && spanY <= height) return z;
+    return spanX <= width && spanY <= height;
+  };
+
+  for (let z = 19; z >= 0; z -= 1) {
+    if (fitsAtZoom(z)) {
+      const zoomIn = Math.min(19, z + SIGN_MAP_ZOOM_IN_STEPS);
+      if (fitsAtZoom(zoomIn)) return zoomIn;
+      return z;
+    }
   }
-  return 0;
+  return Math.min(19, SIGN_MAP_ZOOM_IN_STEPS);
 }
 
 function tileKey(z, x, y) {
@@ -1853,7 +1862,7 @@ async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
           const px = x + ((tx * 256) - left);
           const py = y + ((ty * 256) - top);
           ctx.save();
-          ctx.filter = "contrast(1.25)";
+          ctx.filter = "contrast(1.35)";
           ctx.drawImage(img, px, py, 256, 256);
           ctx.restore();
         } catch {
