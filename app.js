@@ -69,6 +69,8 @@ const MAP_TILE_SUBDOMAINS = "abcd";
 const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO";
 const SIGN_MAP_ZOOM_IN_STEPS = 1;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
+const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
+const SHAPES_WORKER_URL = "./shapes_worker.js";
 
 function setProgress(pct, text) {
   ui.progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
@@ -301,19 +303,21 @@ function estimateLegendHeight(segments, maxSegments = 6) {
 function parseCSVFromZip(zip, filename, { stepRow, complete } = {}) {
   const file = zip.file(filename);
   if (!file) throw new Error(`Missing ${filename} in GTFS zip`);
-  return file.async("string").then((text) => {
-    return new Promise((resolve, reject) => {
-      Papa.parse(text, {
-        header: true,
-        skipEmptyLines: true,
-        dynamicTyping: false,
-        step: stepRow ? (results) => stepRow(results.data) : undefined,
-        complete: (res) => {
-          if (complete) complete(res.data);
-          resolve(res.data);
-        },
-        error: (err) => reject(err),
-      });
+  return file.async("string").then((text) => parseCSVText(text, { stepRow, complete }));
+}
+
+function parseCSVText(text, { stepRow, complete } = {}) {
+  return new Promise((resolve, reject) => {
+    Papa.parse(text, {
+      header: true,
+      skipEmptyLines: true,
+      dynamicTyping: false,
+      step: stepRow ? (results) => stepRow(results.data) : undefined,
+      complete: (res) => {
+        if (complete) complete(res.data);
+        resolve(res.data);
+      },
+      error: (err) => reject(err),
     });
   });
 }
@@ -2138,6 +2142,94 @@ async function tryLoadPreloadedRouteSummaries() {
   }
 }
 
+function mapToObject(mapObj, valueMapper = (v) => v) {
+  const out = {};
+  for (const [k, v] of mapObj.entries()) out[k] = valueMapper(v);
+  return out;
+}
+
+async function buildRouteSummariesInWorker(stopTimesBuffer, generationAtStart) {
+  if (typeof Worker === "undefined") throw new Error("Worker API unavailable");
+
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(STOP_TIMES_WORKER_URL);
+    const cleanup = () => worker.terminate();
+
+    worker.onmessage = (ev) => {
+      const msg = ev.data || {};
+      if (generationAtStart !== bootGeneration) {
+        cleanup();
+        reject(new Error("Boot superseded"));
+        return;
+      }
+      if (msg.type === "progress") {
+        const rowCount = Number(msg.rowCount) || 0;
+        if (rowCount > 0) {
+          const pct = 55 + Math.min(40, (rowCount / 600000) * 40);
+          setProgress(pct, `Indexing stop_times.txt… (${niceInt(rowCount)} rows)`);
+        }
+        return;
+      }
+      if (msg.type === "result") {
+        cleanup();
+        resolve(msg);
+        return;
+      }
+      if (msg.type === "error") {
+        cleanup();
+        reject(new Error(msg.error || "Worker failed"));
+      }
+    };
+    worker.onerror = (err) => {
+      cleanup();
+      reject(err instanceof ErrorEvent ? new Error(err.message || "Worker runtime error") : new Error("Worker runtime error"));
+    };
+
+    worker.postMessage({
+      type: "build",
+      stopTimesBuffer,
+      tripsById: mapToObject(tripsById),
+      routesById: mapToObject(routesById),
+      hasServiceCalendarData,
+      serviceActiveDatesLastWeekById: mapToObject(serviceActiveDatesLastWeekById, (set) => Array.from(set)),
+      lastWeekWeekdayByDateKey: mapToObject(lastWeekWeekdayByDateKey),
+    }, [stopTimesBuffer]);
+  });
+}
+
+async function buildShapesInWorker(shapesBuffer, generationAtStart) {
+  if (typeof Worker === "undefined") throw new Error("Worker API unavailable");
+
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(SHAPES_WORKER_URL);
+    const cleanup = () => worker.terminate();
+
+    worker.onmessage = (ev) => {
+      const msg = ev.data || {};
+      if (generationAtStart !== bootGeneration) {
+        cleanup();
+        reject(new Error("Boot superseded"));
+        return;
+      }
+      if (msg.type === "result") {
+        cleanup();
+        resolve(msg.shapes || {});
+        return;
+      }
+      if (msg.type === "error") {
+        cleanup();
+        reject(new Error(msg.error || "Shapes worker failed"));
+      }
+    };
+    worker.onerror = (err) => {
+      cleanup();
+      reject(err instanceof ErrorEvent ? new Error(err.message || "Shapes worker runtime error") : new Error("Shapes worker runtime error"));
+    };
+
+    worker.postMessage({ type: "build", shapesBuffer }, [shapesBuffer]);
+  });
+}
+
 function getRouteSummaryForStop(stop, directionFilter) {
   const key = routeSummaryCacheKey(stop.stop_id, directionFilter);
   const cached = routeSummaryCache.get(key);
@@ -2559,20 +2651,92 @@ async function boot({ zipUrl, zipFile, zipName }) {
 
   try {
     const zip = zipFile ? await loadZipFromFile(zipFile) : await loadZipFromUrl(zipUrl);
+    const canUsePreloadedSummaries = !zipFile && zipName === "google_transit.zip";
+    const preloadPromise = canUsePreloadedSummaries ? tryLoadPreloadedRouteSummaries() : Promise.resolve(false);
 
     // 1) stops.txt (small-ish)
     setProgress(10, "Parsing stops.txt…");
     stops = await parseCSVFromZip(zip, "stops.txt");
     ui.stopsCount.textContent = niceInt(stops.length);
+    if (generationAtStart !== bootGeneration) return;
 
-    // 2) routes.txt (small)
-    setProgress(20, "Parsing routes.txt…");
+    // 2) start shapes parsing in worker so it can overlap with later GTFS steps.
+    let shapesReady = false;
+    const shapesFile = zip.file("shapes.txt");
+    const shapesPromise = (async () => {
+      if (!shapesFile) {
+        console.warn("No shapes.txt found in GTFS feed; route map overlay will be unavailable.");
+        shapesReady = true;
+        return;
+      }
+
+      try {
+        const shapesBuffer = await shapesFile.async("arraybuffer");
+        const shapesObj = await buildShapesInWorker(shapesBuffer, generationAtStart);
+        if (generationAtStart !== bootGeneration) return;
+        shapesById = new Map();
+        for (const [shapeId, points] of Object.entries(shapesObj || {})) {
+          if (!Array.isArray(points) || points.length < 2) continue;
+          shapesById.set(shapeId, points);
+        }
+      } catch (err) {
+        console.warn("Shapes worker unavailable, falling back to main thread parsing.", err);
+        const rawShapesById = new Map();
+        await parseCSVFromZip(zip, "shapes.txt", {
+          stepRow: (row) => {
+            const shapeId = row.shape_id;
+            if (!shapeId) return;
+            const lat = safeParseFloat(row.shape_pt_lat);
+            const lon = safeParseFloat(row.shape_pt_lon);
+            if (lat == null || lon == null) return;
+            const seq = Number.parseInt(row.shape_pt_sequence, 10);
+
+            let pts = rawShapesById.get(shapeId);
+            if (!pts) {
+              pts = [];
+              rawShapesById.set(shapeId, pts);
+            }
+            pts.push({ lat, lon, seq: Number.isFinite(seq) ? seq : pts.length });
+          },
+        });
+        if (generationAtStart !== bootGeneration) return;
+        shapesById = new Map();
+        for (const [shapeId, pts] of rawShapesById.entries()) {
+          pts.sort((a, b) => a.seq - b.seq);
+          shapesById.set(shapeId, pts.map((p) => [p.lat, p.lon]));
+        }
+      } finally {
+        shapesReady = true;
+      }
+    })();
+    void shapesPromise.catch(() => {});
+
+    // 3) fast path: if preloaded summaries exist, skip trips/routes/calendar/stop_times parsing.
+    setProgress(35, "Loading precomputed route summaries…");
+    const preloadedLoaded = await preloadPromise;
+    if (generationAtStart !== bootGeneration) return;
+    if (preloadedLoaded) {
+      setProgress(45, "Finishing shapes…");
+      await shapesPromise;
+      if (generationAtStart !== bootGeneration) return;
+      ui.routesCount.textContent = "Preloaded";
+      ui.tripsCount.textContent = "Preloaded";
+      ui.indexCount.textContent = "Preloaded";
+      setProgress(98, "Rendering stops on map…");
+      addStopsToMap();
+      setProgress(100, "Ready. Click a stop.");
+      console.log("Loaded with precomputed route summaries.");
+      return;
+    }
+
+    // 4) routes + trips + calendar (required for worker summary build)
+    setProgress(40, "Parsing routes.txt…");
     const routes = await parseCSVFromZip(zip, "routes.txt");
     for (const r of routes) routesById.set(r.route_id, r);
     ui.routesCount.textContent = niceInt(routesById.size);
+    if (generationAtStart !== bootGeneration) return;
 
-    // 3) trips.txt (medium)
-    setProgress(35, "Parsing trips.txt…");
+    setProgress(48, "Parsing trips.txt…");
     const trips = await parseCSVFromZip(zip, "trips.txt");
     for (const t of trips) {
       tripsById.set(t.trip_id, {
@@ -2584,107 +2748,90 @@ async function boot({ zipUrl, zipFile, zipName }) {
       });
     }
     ui.tripsCount.textContent = niceInt(tripsById.size);
+    if (generationAtStart !== bootGeneration) return;
 
-    // 3b) service calendar in the last 7 days
+    setProgress(53, "Parsing service calendar…");
     let calendarRows = [];
     let calendarDateRows = [];
-    if (zip.file("calendar.txt")) {
-      calendarRows = await parseCSVFromZip(zip, "calendar.txt");
-    }
-    if (zip.file("calendar_dates.txt")) {
-      calendarDateRows = await parseCSVFromZip(zip, "calendar_dates.txt");
-    }
+    if (zip.file("calendar.txt")) calendarRows = await parseCSVFromZip(zip, "calendar.txt");
+    if (zip.file("calendar_dates.txt")) calendarDateRows = await parseCSVFromZip(zip, "calendar_dates.txt");
     hasServiceCalendarData = calendarRows.length > 0 || calendarDateRows.length > 0;
     if (hasServiceCalendarData) {
       serviceActiveDatesLastWeekById = buildServiceActiveDatesLastWeek(calendarRows, calendarDateRows);
     }
+    if (generationAtStart !== bootGeneration) return;
 
-    // 4) shapes.txt (optional) -> shape_id -> ordered [lat,lon] path
-    if (zip.file("shapes.txt")) {
-      setProgress(45, "Parsing shapes.txt…");
-      const rawShapesById = new Map(); // shape_id -> [{lat,lon,seq}]
-      await parseCSVFromZip(zip, "shapes.txt", {
+    // 5) stop_times worker path first (multithreaded)
+    setProgress(55, "Indexing stop_times.txt…");
+    const stopTimesFile = zip.file("stop_times.txt");
+    if (!stopTimesFile) throw new Error("Missing stop_times.txt in GTFS zip");
+    const stopTimesBuffer = await stopTimesFile.async("arraybuffer");
+    if (generationAtStart !== bootGeneration) return;
+
+    let workerLoaded = false;
+    try {
+      const msg = await buildRouteSummariesInWorker(stopTimesBuffer, generationAtStart);
+      if (msg?.type === "result" && loadRouteSummaryCacheFromData(msg.data)) {
+        workerLoaded = true;
+        const workerStopCount = Number(msg.stopCount);
+        ui.indexCount.textContent = Number.isFinite(workerStopCount) ? niceInt(workerStopCount) : "Worker";
+      }
+    } catch (err) {
+      console.warn("Worker summary build unavailable, falling back to main thread indexing.", err);
+    }
+    if (generationAtStart !== bootGeneration) return;
+
+    if (!workerLoaded) {
+      const stopTimesText = await stopTimesFile.async("string");
+      let rowCount = 0;
+      await parseCSVText(stopTimesText, {
         stepRow: (row) => {
-          const shapeId = row.shape_id;
-          if (!shapeId) return;
-          const lat = safeParseFloat(row.shape_pt_lat);
-          const lon = safeParseFloat(row.shape_pt_lon);
-          if (lat == null || lon == null) return;
-          const seq = Number.parseInt(row.shape_pt_sequence, 10);
+          rowCount += 1;
+          const stopId = row.stop_id;
+          const tripId = row.trip_id;
+          if (!stopId || !tripId) return;
 
-          let pts = rawShapesById.get(shapeId);
-          if (!pts) {
-            pts = [];
-            rawShapesById.set(shapeId, pts);
+          let set = stopToTrips.get(stopId);
+          if (!set) { set = new Set(); stopToTrips.set(stopId, set); }
+          set.add(tripId);
+
+          const depSec = parseGtfsTimeToSeconds(row.departure_time) ?? parseGtfsTimeToSeconds(row.arrival_time);
+          if (depSec != null) {
+            let byTrip = stopTripTimes.get(stopId);
+            if (!byTrip) {
+              byTrip = new Map();
+              stopTripTimes.set(stopId, byTrip);
+            }
+            const prev = byTrip.get(tripId);
+            if (prev == null || depSec < prev) byTrip.set(tripId, depSec);
           }
-          pts.push({ lat, lon, seq: Number.isFinite(seq) ? seq : pts.length });
+
+          if (rowCount % 50000 === 0) {
+            const pct = 55 + Math.min(40, (rowCount / 600000) * 40);
+            setProgress(pct, `Indexing stop_times.txt… (${niceInt(rowCount)} rows)`);
+          }
         },
       });
-      for (const [shapeId, pts] of rawShapesById.entries()) {
-        pts.sort((a, b) => a.seq - b.seq);
-        shapesById.set(shapeId, pts.map((p) => [p.lat, p.lon]));
-      }
-    } else {
-      console.warn("No shapes.txt found in GTFS feed; route map overlay will be unavailable.");
+
+      ui.indexCount.textContent = niceInt(stopToTrips.size);
     }
 
-    const canUsePreloadedSummaries = !zipFile && zipName === "google_transit.zip";
-    if (canUsePreloadedSummaries) {
-      setProgress(50, "Loading precomputed route summaries…");
-      const loaded = await tryLoadPreloadedRouteSummaries();
-      if (loaded) {
-        ui.indexCount.textContent = "Preloaded";
-        setProgress(98, "Rendering stops on map…");
-        addStopsToMap();
-        setProgress(100, "Ready. Click a stop.");
-        console.log("Loaded with precomputed route summaries.");
-        return;
-      }
+    if (!shapesReady) {
+      setProgress(96, "Finalizing shapes…");
+      await shapesPromise;
+      if (generationAtStart !== bootGeneration) return;
     }
 
-    // 5) stop_times.txt (large) -> build stop_id -> trip_id Set index
-    setProgress(55, "Indexing stop_times.txt (stop -> trips)…");
-    let rowCount = 0;
-
-    await parseCSVFromZip(zip, "stop_times.txt", {
-      stepRow: (row) => {
-        rowCount += 1;
-        const stopId = row.stop_id;
-        const tripId = row.trip_id;
-        if (!stopId || !tripId) return;
-
-        let set = stopToTrips.get(stopId);
-        if (!set) { set = new Set(); stopToTrips.set(stopId, set); }
-        set.add(tripId);
-
-        const depSec = parseGtfsTimeToSeconds(row.departure_time) ?? parseGtfsTimeToSeconds(row.arrival_time);
-        if (depSec != null) {
-          let byTrip = stopTripTimes.get(stopId);
-          if (!byTrip) {
-            byTrip = new Map();
-            stopTripTimes.set(stopId, byTrip);
-          }
-          const prev = byTrip.get(tripId);
-          if (prev == null || depSec < prev) byTrip.set(tripId, depSec);
-        }
-
-        // Update progress every ~50k lines (rough)
-        if (rowCount % 50000 === 0) {
-          const pct = 55 + Math.min(40, (rowCount / 600000) * 40); // heuristic
-          setProgress(pct, `Indexing stop_times.txt… (${niceInt(rowCount)} rows)`);
-        }
-      },
-    });
-
-    ui.indexCount.textContent = niceInt(stopToTrips.size);
     setProgress(98, "Rendering stops on map…");
 
     addStopsToMap();
 
     setProgress(100, "Ready. Click a stop.");
-    setTimeout(() => {
-      void preloadRouteSummariesInBackground(generationAtStart, stops.slice());
-    }, 0);
+    if (!workerLoaded && routeSummaryCache.size === 0) {
+      setTimeout(() => {
+        void preloadRouteSummariesInBackground(generationAtStart, stops.slice());
+      }, 0);
+    }
     console.log("Loaded:", {
       stops: stops.length,
       routes: routesById.size,
