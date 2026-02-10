@@ -61,6 +61,10 @@ const MAP_LINE_PALETTE = [
   "#e63946", "#1d3557", "#2a9d8f", "#f4a261", "#6a4c93",
   "#118ab2", "#ef476f", "#8ac926", "#ff7f11", "#3a86ff",
 ];
+const MAP_TILE_BASE_URL = "https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png";
+const MAP_TILE_LABELS_URL = "https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png";
+const MAP_TILE_SUBDOMAINS = "abcd";
+const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO";
 
 function setProgress(pct, text) {
   ui.progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
@@ -325,9 +329,17 @@ async function loadZipFromFile(file) {
 function initMap() {
   map = L.map("map", { preferCanvas: true }).setView([49.25, -123.12], 11);
 
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  L.tileLayer(MAP_TILE_BASE_URL, {
     maxZoom: 19,
-    attribution: "&copy; OpenStreetMap contributors",
+    subdomains: MAP_TILE_SUBDOMAINS,
+    attribution: MAP_TILE_ATTRIBUTION,
+  }).addTo(map);
+  L.tileLayer(MAP_TILE_LABELS_URL, {
+    maxZoom: 19,
+    subdomains: MAP_TILE_SUBDOMAINS,
+    attribution: MAP_TILE_ATTRIBUTION,
+    pane: "overlayPane",
+    opacity: 1,
   }).addTo(map);
 
   markerCluster = L.markerClusterGroup({
@@ -1768,8 +1780,17 @@ function tileKey(z, x, y) {
   return `${z}/${x}/${y}`;
 }
 
-function loadTileImage(z, x, y) {
-  const key = tileKey(z, x, y);
+function expandTileTemplate(url, { z, x, y, subdomain = "a" }) {
+  return url
+    .replace("{s}", subdomain)
+    .replace("{z}", String(z))
+    .replace("{x}", String(x))
+    .replace("{y}", String(y))
+    .replace("{r}", "");
+}
+
+function loadTileImage(z, x, y, kind = "base") {
+  const key = `${kind}/${tileKey(z, x, y)}`;
   if (tileImageCache.has(key)) return tileImageCache.get(key);
 
   const p = new Promise((resolve, reject) => {
@@ -1783,7 +1804,8 @@ function loadTileImage(z, x, y) {
     img.crossOrigin = "anonymous";
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error(`Tile load failed ${z}/${tx}/${y}`));
-    img.src = `https://tile.openstreetmap.org/${z}/${tx}/${y}.png`;
+    const layerUrl = kind === "labels" ? MAP_TILE_LABELS_URL : MAP_TILE_BASE_URL;
+    img.src = expandTileTemplate(layerUrl, { z, x: tx, y, subdomain: "a" });
   });
 
   tileImageCache.set(key, p);
@@ -1810,7 +1832,7 @@ async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
     for (let ty = y0; ty <= y1; ty += 1) {
       draws.push((async () => {
         try {
-          const img = await loadTileImage(zoom, tx, ty);
+          const img = await loadTileImage(zoom, tx, ty, "base");
           const px = x + ((tx * 256) - left);
           const py = y + ((ty * 256) - top);
           ctx.drawImage(img, px, py, 256, 256);
@@ -1821,6 +1843,26 @@ async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
     }
   }
   await Promise.all(draws);
+
+  const labelDraws = [];
+  for (let tx = x0; tx <= x1; tx += 1) {
+    for (let ty = y0; ty <= y1; ty += 1) {
+      labelDraws.push((async () => {
+        try {
+          const img = await loadTileImage(zoom, tx, ty, "labels");
+          const px = x + ((tx * 256) - left);
+          const py = y + ((ty * 256) - top);
+          ctx.save();
+          ctx.filter = "contrast(1.25)";
+          ctx.drawImage(img, px, py, 256, 256);
+          ctx.restore();
+        } catch {
+          // Best-effort tiles; continue rendering.
+        }
+      })());
+    }
+  }
+  await Promise.all(labelDraws);
 }
 
 function makeCanvasProjector(bounds, drawX, drawY, drawW, drawH) {
@@ -2188,7 +2230,10 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
       const txx = ((tx % n) + n) % n;
       const px = drawX + ((tx * 256) - left);
       const py = drawY + ((ty * 256) - top);
-      mapTileSvg.push(`<image href="https://tile.openstreetmap.org/${zoom}/${txx}/${ty}.png" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="256" height="256" />`);
+      const baseHref = expandTileTemplate(MAP_TILE_BASE_URL, { z: zoom, x: txx, y: ty, subdomain: "a" });
+      const labelsHref = expandTileTemplate(MAP_TILE_LABELS_URL, { z: zoom, x: txx, y: ty, subdomain: "a" });
+      mapTileSvg.push(`<image href="${baseHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="256" height="256" opacity="0.88" />`);
+      mapTileSvg.push(`<image href="${labelsHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="256" height="256" opacity="1" />`);
     }
   }
 
