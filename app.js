@@ -32,6 +32,7 @@ const ui = {
   downloadBtn: el("downloadBtn"),
   copyBtn: el("copyBtn"),
   downloadSvgBtn: el("downloadSvgBtn"),
+  signWrap: el("signWrap"),
   signCanvas: el("signCanvas"),
 };
 
@@ -72,6 +73,46 @@ const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
 const FIXED_DIRECTION_FILTER = "all";
 const FIXED_EXPORT_SCALE = 3;
+const PREVIEW_ZOOM_MIN = 1;
+const PREVIEW_ZOOM_MAX = 5;
+const PREVIEW_ZOOM_STEP = 1.12;
+let previewZoomScale = 1;
+let previewZoomOriginX = 50;
+let previewZoomOriginY = 50;
+
+function applyPreviewZoom() {
+  if (!ui.signCanvas) return;
+  ui.signCanvas.style.transformOrigin = `${previewZoomOriginX}% ${previewZoomOriginY}%`;
+  ui.signCanvas.style.transform = `scale(${previewZoomScale})`;
+}
+
+function resetPreviewZoom() {
+  previewZoomScale = 1;
+  previewZoomOriginX = 50;
+  previewZoomOriginY = 50;
+  applyPreviewZoom();
+}
+
+function clampPreviewZoom(v) {
+  return Math.max(PREVIEW_ZOOM_MIN, Math.min(PREVIEW_ZOOM_MAX, v));
+}
+
+function onSignPreviewWheel(e) {
+  if (!ui.modal || ui.modal.classList.contains("hidden")) return;
+  const rect = ui.signCanvas?.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return;
+  if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
+  e.preventDefault();
+  const relX = (e.clientX - rect.left) / rect.width;
+  const relY = (e.clientY - rect.top) / rect.height;
+  previewZoomOriginX = Math.max(0, Math.min(100, relX * 100));
+  previewZoomOriginY = Math.max(0, Math.min(100, relY * 100));
+  const zoomFactor = e.deltaY < 0 ? PREVIEW_ZOOM_STEP : (1 / PREVIEW_ZOOM_STEP);
+  const next = clampPreviewZoom(previewZoomScale * zoomFactor);
+  if (Math.abs(next - previewZoomScale) < 1e-4) return;
+  previewZoomScale = next;
+  applyPreviewZoom();
+}
 
 function setProgress(pct, text) {
   ui.progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
@@ -389,10 +430,12 @@ function openModal() {
 }
 function closeModal() {
   ui.modal.classList.add("hidden");
+  resetPreviewZoom();
 }
 
 ui.modalBackdrop.addEventListener("click", closeModal);
 ui.closeModal.addEventListener("click", closeModal);
+ui.signWrap?.addEventListener("wheel", onSignPreviewWheel, { passive: false });
 
 function normalizeColor(hex, fallback="#333333") {
   if (!hex) return fallback;
@@ -2676,6 +2719,7 @@ function roundRect(ctx, x, y, w, h, r, fill, stroke) {
 
 function openStop(stop) {
   selectedStop = stop;
+  resetPreviewZoom();
 
   ui.modalTitle.textContent = stop.stop_name || "Bus Stop";
   ui.modalSubtitle.textContent = stop.stop_code ? `Stop #${stop.stop_code}` : `Stop ID: ${stop.stop_id}`;
