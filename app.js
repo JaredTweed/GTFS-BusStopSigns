@@ -562,6 +562,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
   const segmentByRouteId = new Map();
   for (const seg of segments) segmentByRouteId.set(seg.route_id, seg);
   const traceOut = Array.isArray(options.traceOut) ? options.traceOut : null;
+  const traceOrderOut = Array.isArray(options.traceOrderOut) ? options.traceOrderOut : null;
 
   const byEdge = new Map();
   for (const seg of segments) {
@@ -1240,13 +1241,48 @@ function buildSharedEdges(segments, stop = null, options = {}) {
   }
 
   function appendTraceEvents() {
-    if (!traceOut) return;
-    traceOut.length = 0;
+    if (!traceOut && !traceOrderOut) return;
+    if (traceOut) traceOut.length = 0;
+    if (traceOrderOut) traceOrderOut.length = 0;
     const path = buildTracePath();
     if (!path.length) return;
 
     const firstOrder = path[0].order.slice();
-    traceOut.push({ init: firstOrder.map((rid) => lineIdForRoute(rid)) });
+    const firstLineOrder = firstOrder.map((rid) => lineIdForRoute(rid));
+    if (traceOut) traceOut.push({ init: firstLineOrder.slice() });
+
+    if (traceOrderOut) {
+      traceOrderOut.push(firstLineOrder.slice());
+    }
+
+    const mainOrder = firstLineOrder.slice();
+    const splitGroups = [];
+
+    function removeFromMainBySide(id, side) {
+      if (!mainOrder.length) return null;
+      let idx = side === "R" ? mainOrder.lastIndexOf(id) : mainOrder.indexOf(id);
+      if (idx < 0) idx = mainOrder.indexOf(id);
+      if (idx < 0) return null;
+      const removed = mainOrder[idx];
+      mainOrder.splice(idx, 1);
+      return removed;
+    }
+
+    function removeSplitGroupById(id) {
+      const gi = splitGroups.findIndex((g) => g.includes(id));
+      if (gi < 0) return null;
+      const [group] = splitGroups.splice(gi, 1);
+      return group;
+    }
+
+    function pushOrderSnapshot() {
+      if (!traceOrderOut) return;
+      if (splitGroups.length === 0) {
+        traceOrderOut.push(mainOrder.slice());
+        return;
+      }
+      traceOrderOut.push([mainOrder.slice(), ...splitGroups.map((g) => g.slice())]);
+    }
 
     for (let i = 1; i < path.length; i += 1) {
       const prev = path[i - 1];
@@ -1259,11 +1295,20 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         .map((rid) => ({ rid, idx: prevOrder.indexOf(rid) }))
         .sort((a, b) => a.idx - b.idx)
         .forEach(({ rid, idx }) => {
-          traceOut.push({
-            id: lineIdForRoute(rid),
-            op: "S",
-            side: sideForIndex(idx, prevOrder.length),
-          });
+          const id = lineIdForRoute(rid);
+          const side = sideForIndex(idx, prevOrder.length);
+          if (traceOut) {
+            traceOut.push({
+              id,
+              op: "S",
+              side,
+            });
+          }
+          if (traceOrderOut) {
+            const removed = removeFromMainBySide(id, side);
+            if (removed != null) splitGroups.push([removed]);
+            pushOrderSnapshot();
+          }
         });
 
       const mergeRoutes = nextOrder.filter((rid) => !prev.routeIds.includes(rid));
@@ -1271,11 +1316,21 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         .map((rid) => ({ rid, idx: nextOrder.indexOf(rid) }))
         .sort((a, b) => a.idx - b.idx)
         .forEach(({ rid, idx }) => {
-          traceOut.push({
-            id: lineIdForRoute(rid),
-            op: "M",
-            side: sideForIndex(idx, nextOrder.length),
-          });
+          const id = lineIdForRoute(rid);
+          const side = sideForIndex(idx, nextOrder.length);
+          if (traceOut) {
+            traceOut.push({
+              id,
+              op: "M",
+              side,
+            });
+          }
+          if (traceOrderOut) {
+            const group = removeSplitGroupById(id) || [id];
+            if (side === "L") mainOrder.unshift(...group);
+            else mainOrder.push(...group);
+            pushOrderSnapshot();
+          }
         });
     }
   }
@@ -2170,7 +2225,8 @@ function openStop(stop) {
   selectedStopRouteSummary = computeRouteSummaryForStop(stop, directionFilter);
   const debugSegments = buildRouteSegmentsForStop(stop, selectedStopRouteSummary, maxRoutes);
   const overlapEvents = [];
-  buildSharedEdges(debugSegments, stop, { traceOut: overlapEvents });
+  const overlapOrder = [];
+  buildSharedEdges(debugSegments, stop, { traceOut: overlapEvents, traceOrderOut: overlapOrder });
   console.log("Shared route ordering events", {
     stop_id: stop.stop_id,
     stop_code: stop.stop_code || null,
@@ -2178,6 +2234,7 @@ function openStop(stop) {
     direction_filter: directionFilter,
     max_routes: maxRoutes,
     events: overlapEvents,
+    order: overlapOrder,
   });
 
   drawSign({
