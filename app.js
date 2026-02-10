@@ -1272,12 +1272,14 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     const firstOrder = path[0].order.slice();
     const firstLineOrder = firstOrder.map((rid) => lineIdForRoute(rid));
     const traceEventsByRoute = [];
+    const stepEvents = [];
 
     for (let i = 1; i < path.length; i += 1) {
       const prev = path[i - 1];
       const next = path[i];
       const prevOrder = prev.order.slice();
       const nextOrder = next.order.slice();
+      const perStep = [];
 
       const splitRoutes = prevOrder.filter((rid) => !next.routeIds.includes(rid));
       splitRoutes
@@ -1285,7 +1287,9 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         .sort((a, b) => a.idx - b.idx)
         .forEach(({ rid, idx }) => {
           const side = sideForIndex(idx, prevOrder.length);
-          traceEventsByRoute.push({ id: rid, op: "S", side });
+          const ev = { id: rid, op: "S", side };
+          traceEventsByRoute.push(ev);
+          perStep.push(ev);
         });
 
       const mergeRoutes = nextOrder.filter((rid) => !prev.routeIds.includes(rid));
@@ -1294,8 +1298,11 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         .sort((a, b) => a.idx - b.idx)
         .forEach(({ rid, idx }) => {
           const side = sideForIndex(idx, nextOrder.length);
-          traceEventsByRoute.push({ id: rid, op: "M", side });
+          const ev = { id: rid, op: "M", side };
+          traceEventsByRoute.push(ev);
+          perStep.push(ev);
         });
+      stepEvents.push(perStep);
     }
 
     function terminalSplitSideForRoute(comp, rid, fallbackSide) {
@@ -1420,6 +1427,15 @@ function buildSharedEdges(segments, stop = null, options = {}) {
 
     const masterRouteOrder = optimizeStartOrder(firstOrder, traceEventsByRoute);
     path[0].order = masterRouteOrder.slice();
+
+    // Keep path component orders aligned with the same event replay used for
+    // trace output so rendered lane ordering matches the console order.
+    const replayOrder = masterRouteOrder.slice();
+    for (let i = 1; i < path.length; i += 1) {
+      for (const ev of (stepEvents[i - 1] || [])) applyBubble(replayOrder, ev.id, ev.side);
+      const projected = replayOrder.filter((rid) => path[i].routeIds.includes(rid));
+      if (projected.length) path[i].order = projected;
+    }
 
     const displayEvents = traceEventsByRoute.map((ev) => ({
       id: lineIdForRoute(ev.id),
