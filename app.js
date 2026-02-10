@@ -1249,40 +1249,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
 
     const firstOrder = path[0].order.slice();
     const firstLineOrder = firstOrder.map((rid) => lineIdForRoute(rid));
-    if (traceOut) traceOut.push({ init: firstLineOrder.slice() });
-
-    if (traceOrderOut) {
-      traceOrderOut.push(firstLineOrder.slice());
-    }
-
-    const mainOrder = firstLineOrder.slice();
-    const splitGroups = [];
-
-    function removeFromMainBySide(id, side) {
-      if (!mainOrder.length) return null;
-      let idx = side === "R" ? mainOrder.lastIndexOf(id) : mainOrder.indexOf(id);
-      if (idx < 0) idx = mainOrder.indexOf(id);
-      if (idx < 0) return null;
-      const removed = mainOrder[idx];
-      mainOrder.splice(idx, 1);
-      return removed;
-    }
-
-    function removeSplitGroupById(id) {
-      const gi = splitGroups.findIndex((g) => g.includes(id));
-      if (gi < 0) return null;
-      const [group] = splitGroups.splice(gi, 1);
-      return group;
-    }
-
-    function pushOrderSnapshot() {
-      if (!traceOrderOut) return;
-      if (splitGroups.length === 0) {
-        traceOrderOut.push(mainOrder.slice());
-        return;
-      }
-      traceOrderOut.push([mainOrder.slice(), ...splitGroups.map((g) => g.slice())]);
-    }
+    const traceEvents = [];
 
     for (let i = 1; i < path.length; i += 1) {
       const prev = path[i - 1];
@@ -1297,18 +1264,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         .forEach(({ rid, idx }) => {
           const id = lineIdForRoute(rid);
           const side = sideForIndex(idx, prevOrder.length);
-          if (traceOut) {
-            traceOut.push({
-              id,
-              op: "S",
-              side,
-            });
-          }
-          if (traceOrderOut) {
-            const removed = removeFromMainBySide(id, side);
-            if (removed != null) splitGroups.push([removed]);
-            pushOrderSnapshot();
-          }
+          traceEvents.push({ id, op: "S", side });
         });
 
       const mergeRoutes = nextOrder.filter((rid) => !prev.routeIds.includes(rid));
@@ -1318,20 +1274,125 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         .forEach(({ rid, idx }) => {
           const id = lineIdForRoute(rid);
           const side = sideForIndex(idx, nextOrder.length);
-          if (traceOut) {
-            traceOut.push({
-              id,
-              op: "M",
-              side,
-            });
-          }
-          if (traceOrderOut) {
-            const group = removeSplitGroupById(id) || [id];
-            if (side === "L") mainOrder.unshift(...group);
-            else mainOrder.push(...group);
-            pushOrderSnapshot();
-          }
+          traceEvents.push({ id, op: "M", side });
         });
+    }
+
+    if (traceOut) {
+      traceOut.push({ init: firstLineOrder.slice() });
+      for (const ev of traceEvents) traceOut.push({ ...ev });
+    }
+
+    if (!traceOrderOut) return;
+
+    function applyBubble(order, id, side) {
+      const idx = order.indexOf(id);
+      if (idx < 0) return;
+      if (side === "L") {
+        for (let i = idx; i > 0; i -= 1) {
+          const t = order[i - 1];
+          order[i - 1] = order[i];
+          order[i] = t;
+        }
+        return;
+      }
+      for (let i = idx; i < order.length - 1; i += 1) {
+        const t = order[i + 1];
+        order[i + 1] = order[i];
+        order[i] = t;
+      }
+    }
+
+    function permutations(arr) {
+      if (arr.length <= 1) return [arr.slice()];
+      const out = [];
+      for (let i = 0; i < arr.length; i += 1) {
+        const head = arr[i];
+        const tail = arr.slice(0, i).concat(arr.slice(i + 1));
+        const tailPerms = permutations(tail);
+        for (const p of tailPerms) out.push([head, ...p]);
+      }
+      return out;
+    }
+
+    function sequenceSwapCost(startOrder, events) {
+      const sim = startOrder.slice();
+      let cost = 0;
+      for (const ev of events) {
+        const idx = sim.indexOf(ev.id);
+        if (idx < 0) continue;
+        const target = ev.side === "L" ? 0 : (sim.length - 1);
+        cost += Math.abs(target - idx);
+        applyBubble(sim, ev.id, ev.side);
+      }
+      return cost;
+    }
+
+    function optimizeStartOrder(baseOrder, events) {
+      if (!events.length || baseOrder.length <= 1) return baseOrder.slice();
+      if (baseOrder.length <= 8) {
+        let best = baseOrder.slice();
+        let bestCost = sequenceSwapCost(best, events);
+        const all = permutations(baseOrder);
+        for (const cand of all) {
+          const c = sequenceSwapCost(cand, events);
+          if (c < bestCost) {
+            best = cand.slice();
+            bestCost = c;
+          }
+        }
+        return best;
+      }
+
+      const rank = new Map();
+      for (let i = 0; i < events.length; i += 1) {
+        const ev = events[i];
+        if (!rank.has(ev.id)) rank.set(ev.id, i + (ev.side === "L" ? -0.5 : 0.5));
+      }
+      return baseOrder.slice().sort((a, b) => {
+        const ra = rank.has(a) ? rank.get(a) : 1e9;
+        const rb = rank.has(b) ? rank.get(b) : 1e9;
+        if (ra !== rb) return ra - rb;
+        return String(a).localeCompare(String(b));
+      });
+    }
+
+    const masterOrder = optimizeStartOrder(firstLineOrder, traceEvents);
+    traceOrderOut.push([masterOrder.slice()]);
+
+    const splitSideById = new Map(); // id -> "L" | "R"
+
+    function splitGroupsFromMaster(order, splitSideMap) {
+      const left = [];
+      const right = [];
+      for (let i = 0; i < order.length; i += 1) {
+        const id = order[i];
+        const side = splitSideMap.get(id);
+        if (!side) continue;
+        if (side === "L") left.push({ id, idx: i });
+        else right.push({ id, idx: i });
+      }
+
+      left.sort((a, b) => a.idx - b.idx);
+      right.sort((a, b) => b.idx - a.idx);
+      return [...left.map((x) => [x.id]), ...right.map((x) => [x.id])];
+    }
+
+    for (const ev of traceEvents) {
+      applyBubble(masterOrder, ev.id, ev.side);
+      if (ev.op === "S") splitSideById.set(ev.id, ev.side);
+      else if (ev.op === "M") splitSideById.delete(ev.id);
+
+      const splitCount = splitSideById.size;
+      let main;
+      if (ev.op === "S" && splitCount === 1) {
+        main = masterOrder.slice();
+      } else {
+        main = masterOrder.filter((id) => !splitSideById.has(id));
+      }
+
+      const groups = splitGroupsFromMaster(masterOrder, splitSideById);
+      traceOrderOut.push([main, ...groups]);
     }
   }
 
