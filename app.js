@@ -1298,11 +1298,37 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         });
     }
 
+    function terminalSplitSideForRoute(comp, rid, fallbackSide) {
+      const eps = 1e-9;
+      const nodeCandidates = [];
+      for (const nodeKey of comp.nodeCoords.keys()) {
+        const contexts = collectRouteNodeContexts(comp, rid, nodeKey);
+        if (!contexts.length) continue;
+        const splitNodeIdx = contexts
+          .filter((ctx) => ctx.prevInComp && !ctx.nextInComp)
+          .reduce((m, ctx) => Math.max(m, ctx.idx), -Infinity);
+        if (!Number.isFinite(splitNodeIdx)) continue;
+        nodeCandidates.push({ nodeKey, splitNodeIdx });
+      }
+      if (!nodeCandidates.length) return fallbackSide;
+
+      nodeCandidates.sort((a, b) => b.splitNodeIdx - a.splitNodeIdx);
+      const bestNode = nodeCandidates[0].nodeKey;
+      const { nx, ny } = normalFromCompAtNode(comp, bestNode, comp.routeIds);
+
+      let obs = routeBoundaryObservation(comp, rid, bestNode, nx, ny, { requireOutside: true, preferredTransition: "split" });
+      if (!obs) obs = routeBoundaryObservation(comp, rid, bestNode, nx, ny, { requireOutside: true });
+      if (!obs) obs = routeBoundaryObservation(comp, rid, bestNode, nx, ny);
+      if (!obs || !Number.isFinite(obs.side) || Math.abs(obs.side) < eps) return fallbackSide;
+      return obs.side > 0 ? "L" : "R";
+    }
+
     // Shared-overlap tracing stops at the final shared component. If multiple
-    // routes are still overlapped there, represent the terminal divergence by
-    // splitting all but one "main" route.
+    // routes are still overlapped there, represent terminal divergence by
+    // splitting all but one "main" route and infer side from geometry.
     const terminalOrder = path[path.length - 1].order.slice();
     if (terminalOrder.length > 1) {
+      const terminalComp = path[path.length - 1];
       const keepIdx = Math.floor(terminalOrder.length / 2);
       const terminalSplits = terminalOrder
         .map((rid, idx) => ({ rid, idx }))
@@ -1314,7 +1340,8 @@ function buildSharedEdges(segments, stop = null, options = {}) {
           return a.idx - b.idx;
         });
       for (const { rid, idx } of terminalSplits) {
-        const side = sideForIndex(idx, terminalOrder.length);
+        const fallbackSide = sideForIndex(idx, terminalOrder.length);
+        const side = terminalSplitSideForRoute(terminalComp, rid, fallbackSide);
         traceEventsByRoute.push({ id: rid, op: "S", side });
       }
     }
