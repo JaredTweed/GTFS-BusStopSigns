@@ -68,6 +68,7 @@ const MAP_TILE_LABELS_URL = "https://{s}.basemaps.cartocdn.com/rastertiles/voyag
 const MAP_TILE_SUBDOMAINS = "abcd";
 const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO";
 const SIGN_MAP_ZOOM_IN_STEPS = 1;
+const SIGN_MAP_ZOOM_FIT_STEP = 0.5;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
@@ -1782,7 +1783,7 @@ function chooseMapZoom(bounds, width, height) {
     return spanX <= width && spanY <= height;
   };
 
-  for (let z = 19; z >= 0; z -= 1) {
+  for (let z = 19; z >= 0; z -= SIGN_MAP_ZOOM_FIT_STEP) {
     if (fitsAtZoom(z)) {
       const zoomIn = Math.min(19, z + SIGN_MAP_ZOOM_IN_STEPS);
       if (fitsAtZoom(zoomIn)) return zoomIn;
@@ -1829,29 +1830,33 @@ function loadTileImage(z, x, y, kind = "base") {
 }
 
 async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
-  const zoom = chooseMapZoom(bounds, w, h);
+  const renderZoom = chooseMapZoom(bounds, w, h);
+  const tileZoom = Math.max(0, Math.floor(renderZoom));
+  const scale = 2 ** (renderZoom - tileZoom);
   const centerLat = (bounds.minLat + bounds.maxLat) / 2;
   const centerLon = (bounds.minLon + bounds.maxLon) / 2;
-  const centerWorld = latLonToWorld(centerLat, centerLon, zoom);
+  const centerTileWorld = latLonToWorld(centerLat, centerLon, tileZoom);
+  const centerWorld = { x: centerTileWorld.x * scale, y: centerTileWorld.y * scale };
   const left = centerWorld.x - (w / 2);
   const top = centerWorld.y - (h / 2);
   const right = centerWorld.x + (w / 2);
   const bottom = centerWorld.y + (h / 2);
 
-  const x0 = Math.floor(left / 256);
-  const y0 = Math.floor(top / 256);
-  const x1 = Math.floor(right / 256);
-  const y1 = Math.floor(bottom / 256);
+  const tileSize = 256 * scale;
+  const x0 = Math.floor(left / tileSize);
+  const y0 = Math.floor(top / tileSize);
+  const x1 = Math.floor(right / tileSize);
+  const y1 = Math.floor(bottom / tileSize);
 
   const draws = [];
   for (let tx = x0; tx <= x1; tx += 1) {
     for (let ty = y0; ty <= y1; ty += 1) {
       draws.push((async () => {
         try {
-          const img = await loadTileImage(zoom, tx, ty, "base");
-          const px = x + ((tx * 256) - left);
-          const py = y + ((ty * 256) - top);
-          ctx.drawImage(img, px, py, 256, 256);
+          const img = await loadTileImage(tileZoom, tx, ty, "base");
+          const px = x + ((tx * tileSize) - left);
+          const py = y + ((ty * tileSize) - top);
+          ctx.drawImage(img, px, py, tileSize, tileSize);
         } catch {
           // Best-effort tiles; continue rendering.
         }
@@ -1865,12 +1870,12 @@ async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
     for (let ty = y0; ty <= y1; ty += 1) {
       labelDraws.push((async () => {
         try {
-          const img = await loadTileImage(zoom, tx, ty, "labels");
-          const px = x + ((tx * 256) - left);
-          const py = y + ((ty * 256) - top);
+          const img = await loadTileImage(tileZoom, tx, ty, "labels");
+          const px = x + ((tx * tileSize) - left);
+          const py = y + ((ty * tileSize) - top);
           ctx.save();
           ctx.filter = "contrast(1.35)";
-          ctx.drawImage(img, px, py, 256, 256);
+          ctx.drawImage(img, px, py, tileSize, tileSize);
           ctx.restore();
         } catch {
           // Best-effort tiles; continue rendering.
@@ -2379,18 +2384,22 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   const drawH = mapOuterH - (mapInnerPad * 2) - legendHForMap;
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
 
-  const zoom = chooseMapZoom(bounds, drawW, drawH);
+  const renderZoom = chooseMapZoom(bounds, drawW, drawH);
+  const tileZoom = Math.max(0, Math.floor(renderZoom));
+  const scale = 2 ** (renderZoom - tileZoom);
   const centerLat = (bounds.minLat + bounds.maxLat) / 2;
   const centerLon = (bounds.minLon + bounds.maxLon) / 2;
-  const centerWorld = latLonToWorld(centerLat, centerLon, zoom);
+  const centerTileWorld = latLonToWorld(centerLat, centerLon, tileZoom);
+  const centerWorld = { x: centerTileWorld.x * scale, y: centerTileWorld.y * scale };
   const left = centerWorld.x - (drawW / 2);
   const top = centerWorld.y - (drawH / 2);
   const right = centerWorld.x + (drawW / 2);
   const bottom = centerWorld.y + (drawH / 2);
-  const x0 = Math.floor(left / 256);
-  const y0 = Math.floor(top / 256);
-  const x1 = Math.floor(right / 256);
-  const y1 = Math.floor(bottom / 256);
+  const tileSize = 256 * scale;
+  const x0 = Math.floor(left / tileSize);
+  const y0 = Math.floor(top / tileSize);
+  const x1 = Math.floor(right / tileSize);
+  const y1 = Math.floor(bottom / tileSize);
 
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
@@ -2402,15 +2411,15 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   const mapTileSvg = [];
   for (let tx = x0; tx <= x1; tx += 1) {
     for (let ty = y0; ty <= y1; ty += 1) {
-      const n = 2 ** zoom;
+      const n = 2 ** tileZoom;
       if (ty < 0 || ty >= n) continue;
       const txx = ((tx % n) + n) % n;
-      const px = drawX + ((tx * 256) - left);
-      const py = drawY + ((ty * 256) - top);
-      const baseHref = expandTileTemplate(MAP_TILE_BASE_URL, { z: zoom, x: txx, y: ty, subdomain: "a" });
-      const labelsHref = expandTileTemplate(MAP_TILE_LABELS_URL, { z: zoom, x: txx, y: ty, subdomain: "a" });
-      mapTileSvg.push(`<image href="${baseHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="256" height="256" opacity="0.88" />`);
-      mapTileSvg.push(`<image href="${labelsHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="256" height="256" opacity="1" />`);
+      const px = drawX + ((tx * tileSize) - left);
+      const py = drawY + ((ty * tileSize) - top);
+      const baseHref = expandTileTemplate(MAP_TILE_BASE_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a" });
+      const labelsHref = expandTileTemplate(MAP_TILE_LABELS_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a" });
+      mapTileSvg.push(`<image href="${baseHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="${tileSize.toFixed(2)}" height="${tileSize.toFixed(2)}" opacity="0.88" />`);
+      mapTileSvg.push(`<image href="${labelsHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="${tileSize.toFixed(2)}" height="${tileSize.toFixed(2)}" opacity="1" />`);
     }
   }
 
