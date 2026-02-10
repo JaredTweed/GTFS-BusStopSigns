@@ -1298,6 +1298,27 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         });
     }
 
+    // Shared-overlap tracing stops at the final shared component. If multiple
+    // routes are still overlapped there, represent the terminal divergence by
+    // splitting all but one "main" route.
+    const terminalOrder = path[path.length - 1].order.slice();
+    if (terminalOrder.length > 1) {
+      const keepIdx = Math.floor(terminalOrder.length / 2);
+      const terminalSplits = terminalOrder
+        .map((rid, idx) => ({ rid, idx }))
+        .filter((x) => x.idx !== keepIdx)
+        .sort((a, b) => {
+          const da = Math.abs(a.idx - keepIdx);
+          const db = Math.abs(b.idx - keepIdx);
+          if (da !== db) return db - da;
+          return a.idx - b.idx;
+        });
+      for (const { rid, idx } of terminalSplits) {
+        const side = sideForIndex(idx, terminalOrder.length);
+        traceEventsByRoute.push({ id: rid, op: "S", side });
+      }
+    }
+
     function applyBubble(order, id, side) {
       const idx = order.indexOf(id);
       if (idx < 0) return;
@@ -1411,13 +1432,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       if (ev.op === "S") splitSideById.set(ev.id, ev.side);
       else if (ev.op === "M") splitSideById.delete(ev.id);
 
-      const splitCount = splitSideById.size;
-      let main;
-      if (ev.op === "S" && splitCount === 1) {
-        main = masterRouteOrder.slice();
-      } else {
-        main = masterRouteOrder.filter((rid) => !splitSideById.has(rid));
-      }
+      const main = masterRouteOrder.filter((rid) => !splitSideById.has(rid));
 
       const groups = splitGroupsFromMaster(masterRouteOrder, splitSideById);
       traceOrderOut.push([
