@@ -29,8 +29,6 @@ const ui = {
   closeModal: el("closeModal"),
   modalTitle: el("modalTitle"),
   modalSubtitle: el("modalSubtitle"),
-  directionSelect: el("directionSelect"),
-  maxRoutes: el("maxRoutes"),
   downloadBtn: el("downloadBtn"),
   copyBtn: el("copyBtn"),
   downloadSvgBtn: el("downloadSvgBtn"),
@@ -72,6 +70,8 @@ const SIGN_MAP_ZOOM_FIT_STEP = 0.5;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
+const FIXED_DIRECTION_FILTER = "all";
+const FIXED_EXPORT_SCALE = 3;
 
 function setProgress(pct, text) {
   ui.progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
@@ -1922,13 +1922,13 @@ function tileKey(z, x, y) {
   return `${z}/${x}/${y}`;
 }
 
-function expandTileTemplate(url, { z, x, y, subdomain = "a" }) {
+function expandTileTemplate(url, { z, x, y, subdomain = "a", retinaSuffix = "" }) {
   return url
     .replace("{s}", subdomain)
     .replace("{z}", String(z))
     .replace("{x}", String(x))
     .replace("{y}", String(y))
-    .replace("{r}", "");
+    .replace("{r}", retinaSuffix);
 }
 
 function loadTileImage(z, x, y, kind = "base") {
@@ -2416,16 +2416,21 @@ async function preloadRouteSummariesInBackground(generationAtStart, stopsList) {
   }
 }
 
-async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken }) {
+async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken, outputScale = 1 }) {
   const canvas = ui.signCanvas;
   const ctx = canvas.getContext("2d");
 
-  // Scale for crispness
+  const scale = Math.max(1, Math.min(3, Number(outputScale) || 1));
+
+  // Logical sign size
   const W = 900, H = 1200;
-  canvas.width = W; canvas.height = H;
+  canvas.width = Math.round(W * scale);
+  canvas.height = Math.round(H * scale);
 
   // Background
-  ctx.clearRect(0, 0, W, H);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, W, H);
 
@@ -2498,7 +2503,11 @@ function escXml(s) {
     .replaceAll("'", "&apos;");
 }
 
-function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
+function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1 }) {
+  const exportScale = Math.max(1, Math.min(3, Number(outputScale) || 1));
+  const svgOutW = Math.round(900 * exportScale);
+  const svgOutH = Math.round(1200 * exportScale);
+  const svgTileRetinaSuffix = "@2x";
   const W = 900;
   const H = 1200;
   const pad = 50;
@@ -2559,8 +2568,8 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
       const txx = ((tx % n) + n) % n;
       const px = drawX + ((tx * tileSize) - left);
       const py = drawY + ((ty * tileSize) - top);
-      const baseHref = expandTileTemplate(MAP_TILE_BASE_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a" });
-      const labelsHref = expandTileTemplate(MAP_TILE_LABELS_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a" });
+      const baseHref = expandTileTemplate(MAP_TILE_BASE_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a", retinaSuffix: svgTileRetinaSuffix });
+      const labelsHref = expandTileTemplate(MAP_TILE_LABELS_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a", retinaSuffix: svgTileRetinaSuffix });
       mapTileSvg.push(`<image href="${baseHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="${tileSize.toFixed(2)}" height="${tileSize.toFixed(2)}" opacity="0.88" />`);
       mapTileSvg.push(`<image href="${labelsHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="${tileSize.toFixed(2)}" height="${tileSize.toFixed(2)}" opacity="1" />`);
     }
@@ -2627,7 +2636,7 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${svgOutW}" height="${svgOutH}" viewBox="0 0 ${W} ${H}">
   <defs>
     <clipPath id="${mapClipId}">
       <rect x="${drawX.toFixed(2)}" y="${drawY.toFixed(2)}" width="${drawW.toFixed(2)}" height="${drawH.toFixed(2)}" rx="10" />
@@ -2671,12 +2680,12 @@ function openStop(stop) {
   ui.modalTitle.textContent = stop.stop_name || "Bus Stop";
   ui.modalSubtitle.textContent = stop.stop_code ? `Stop #${stop.stop_code}` : `Stop ID: ${stop.stop_id}`;
 
-  const directionFilter = ui.directionSelect.value || "all";
-  const maxRoutes = Math.max(4, Math.min(20, parseInt(ui.maxRoutes.value || "6", 10)));
+  const directionFilter = FIXED_DIRECTION_FILTER;
   const renderToken = ++signRenderToken;
 
   openModal();
   selectedStopRouteSummary = getRouteSummaryForStop(stop, directionFilter);
+  const maxRoutes = selectedStopRouteSummary.length;
   const debugSegments = buildRouteSegmentsForStop(stop, selectedStopRouteSummary, maxRoutes);
   const overlapEvents = [];
   const overlapOrder = [];
@@ -2700,31 +2709,47 @@ function openStop(stop) {
   }).catch((err) => console.error("Sign render failed", err));
 }
 
-ui.directionSelect.addEventListener("change", () => {
-  if (!selectedStop) return;
-  openStop(selectedStop);
-});
-
-ui.maxRoutes.addEventListener("change", () => {
-  if (!selectedStop) return;
-  openStop(selectedStop);
-});
-
-ui.downloadBtn.addEventListener("click", () => {
+ui.downloadBtn.addEventListener("click", async () => {
   const stop = selectedStop;
   if (!stop) return;
 
   const canvas = ui.signCanvas;
   const name = (stop.stop_name || "bus_stop").toString().replace(/[^\w\-]+/g, "_").slice(0, 50);
   const code = (stop.stop_code || stop.stop_id || "").toString().replace(/[^\w\-]+/g, "_").slice(0, 30);
-  const dir = ui.directionSelect.value || "all";
-  const filename = `${name}_${code}_dir-${dir}.png`;
+  const directionFilter = FIXED_DIRECTION_FILTER;
+  const maxRoutes = Math.max(0, getRouteSummaryForStop(stop, directionFilter).length);
+  const outputScale = FIXED_EXPORT_SCALE;
+  const filename = `${name}_${code}_dir-${directionFilter}_png-${outputScale}x.png`;
 
   try {
+    const renderToken = ++signRenderToken;
+    const items = getRouteSummaryForStop(stop, directionFilter);
+    await drawSign({
+      stop,
+      items,
+      directionFilter,
+      maxRoutes,
+      renderToken,
+      outputScale,
+    });
+    if (renderToken !== signRenderToken) return;
+
     const a = document.createElement("a");
     a.download = filename;
     a.href = canvas.toDataURL("image/png");
     a.click();
+
+    if (outputScale !== 1) {
+      const previewToken = ++signRenderToken;
+      drawSign({
+        stop,
+        items,
+        directionFilter,
+        maxRoutes,
+        renderToken: previewToken,
+        outputScale: 1,
+      }).catch((err) => console.error("Sign render failed", err));
+    }
   } catch (err) {
     console.error(err);
     alert("Failed to export PNG. Try again in a moment.");
@@ -2735,14 +2760,15 @@ ui.downloadSvgBtn.addEventListener("click", () => {
   const stop = selectedStop;
   if (!stop) return;
 
-  const directionFilter = ui.directionSelect.value || "all";
-  const maxRoutes = Math.max(4, Math.min(20, parseInt(ui.maxRoutes.value || "6", 10)));
+  const directionFilter = FIXED_DIRECTION_FILTER;
+  const maxRoutes = Math.max(0, getRouteSummaryForStop(stop, directionFilter).length);
+  const outputScale = FIXED_EXPORT_SCALE;
   const items = getRouteSummaryForStop(stop, directionFilter);
-  const svg = buildSignSvg({ stop, items, directionFilter, maxRoutes });
+  const svg = buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale });
 
   const name = (stop.stop_name || "bus_stop").toString().replace(/[^\w\-]+/g, "_").slice(0, 50);
   const code = (stop.stop_code || stop.stop_id || "").toString().replace(/[^\w\-]+/g, "_").slice(0, 30);
-  const filename = `${name}_${code}_dir-${directionFilter}.svg`;
+  const filename = `${name}_${code}_dir-${directionFilter}_svg-${outputScale}x.svg`;
 
   const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);

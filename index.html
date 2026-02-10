@@ -26,7 +26,7 @@
   <header class="topbar">
     <div class="topbar__left">
       <div class="brand">Bus Stop Map</div>
-      <div class="muted">Click a stop → pick direction → download a sign PNG</div>
+      <div class="muted">Click a stop → download a sign PNG/SVG</div>
     </div>
 
     <div class="topbar__right">
@@ -81,20 +81,6 @@
       </div>
 
       <div class="modal__controls">
-        <label class="field">
-          <div class="field__label">Direction</div>
-          <select id="directionSelect" class="input">
-            <option value="all">All directions</option>
-            <option value="0">Direction 0</option>
-            <option value="1">Direction 1</option>
-          </select>
-        </label>
-
-        <label class="field">
-          <div class="field__label">Max routes on sign</div>
-          <input id="maxRoutes" class="input" type="number" min="4" max="20" value="6" />
-        </label>
-
         <button id="downloadBtn" class="btn btn--primary">Download PNG</button>
         <button id="copyBtn" class="btn btn--ghost">Copy PNG</button>
         <button id="downloadSvgBtn" class="btn btn--ghost">Download SVG</button>
