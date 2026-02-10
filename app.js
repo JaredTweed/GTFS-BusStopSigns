@@ -286,7 +286,7 @@ function splitTextByMaxChars(text, maxChars) {
 }
 
 function buildLegendLinesForSegment(seg, maxChars = 86) {
-  const route = (seg?.route_short_name || "Route").toString().trim();
+  const route = (seg?.display_name || seg?.route_short_name || "Route").toString().trim();
   const active = (seg?.active_hours_text || "").toString().trim();
   if (!active) return splitTextByMaxChars(route, maxChars);
   return splitTextByMaxChars(`${route} ${active}`.trim(), maxChars);
@@ -426,6 +426,12 @@ function buildRouteSegmentsForStop(stop, items, maxRoutes) {
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
   const shown = items.slice(0, maxRoutes);
+  const shortNameCounts = new Map();
+  for (const it of shown) {
+    const short = (it?.route_short_name || "").toString().trim();
+    if (!short) continue;
+    shortNameCounts.set(short, (shortNameCounts.get(short) || 0) + 1);
+  }
   const segments = [];
   const usedRouteShapes = new Set();
 
@@ -453,9 +459,20 @@ function buildRouteSegmentsForStop(stop, items, maxRoutes) {
     const clipped = shape.slice(startIdx);
     if (clipped.length < 2) continue;
 
+    const short = (it.route_short_name || "").toString().trim();
+    const headsign = (it.headsign || "").toString().trim();
+    let displayName = short || "Route";
+    if ((shortNameCounts.get(short) || 0) > 1) {
+      if (headsign) displayName = headsign;
+      else if (short && it.route_id) displayName = `${short} (${it.route_id})`;
+    }
+
     segments.push({
       route_id: it.route_id,
-      route_short_name: it.route_short_name || "",
+      overlap_route_id: routeShapeKey,
+      route_short_name: short,
+      headsign,
+      display_name: displayName,
       active_hours_text: it.active_hours_text || buildActiveHoursText([]),
       shape_id: it.shape_id,
       points: clipped,
@@ -581,12 +598,16 @@ function edgeKey(a, b) {
 
 function buildSharedEdges(segments, stop = null, options = {}) {
   const segmentByRouteId = new Map();
-  for (const seg of segments) segmentByRouteId.set(seg.route_id, seg);
+  for (const seg of segments) {
+    const rid = seg.overlap_route_id || seg.route_id;
+    segmentByRouteId.set(rid, seg);
+  }
   const traceOut = Array.isArray(options.traceOut) ? options.traceOut : null;
   const traceOrderOut = Array.isArray(options.traceOrderOut) ? options.traceOrderOut : null;
 
   const byEdge = new Map();
   for (const seg of segments) {
+    const rid = seg.overlap_route_id || seg.route_id;
     for (let i = 1; i < seg.points.length; i += 1) {
       const a = seg.points[i - 1];
       const b = seg.points[i];
@@ -596,9 +617,9 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         e = { key, a, b, routeIds: new Set(), colorByRoute: new Map(), firstEdgeIdxByRoute: new Map() };
         byEdge.set(key, e);
       }
-      e.routeIds.add(seg.route_id);
-      e.colorByRoute.set(seg.route_id, seg.lineColor);
-      if (!e.firstEdgeIdxByRoute.has(seg.route_id)) e.firstEdgeIdxByRoute.set(seg.route_id, i - 1);
+      e.routeIds.add(rid);
+      e.colorByRoute.set(rid, seg.lineColor);
+      if (!e.firstEdgeIdxByRoute.has(rid)) e.firstEdgeIdxByRoute.set(rid, i - 1);
     }
   }
 
@@ -921,8 +942,8 @@ function buildSharedEdges(segments, stop = null, options = {}) {
 
   function lineIdForRoute(routeId) {
     const seg = segmentByRouteId.get(routeId);
-    const short = (seg?.route_short_name ?? "").toString().trim();
-    return short || String(routeId);
+    const label = (seg?.display_name ?? seg?.route_short_name ?? "").toString().trim();
+    return label || String(routeId);
   }
 
   function computeBaseScores(comp) {
@@ -2047,7 +2068,7 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
   ctx.font = "700 12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
   for (const seg of segments.slice(0, 6)) {
     const lines = buildLegendLinesForSegment(seg);
-    const first = lines[0] || (seg.route_short_name || "Route");
+    const first = lines[0] || (seg.display_name || seg.route_short_name || "Route");
     const swatchW = 18;
     ctx.fillStyle = seg.lineColor;
     roundRect(ctx, legendX, legendY - 10, swatchW, 5, 2, true, false);
@@ -2520,7 +2541,7 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   let legendY = mapOuterY + mapOuterH - legendHForMap + 16;
   for (const seg of routeSegments.slice(0, 6)) {
     const lines = buildLegendLinesForSegment(seg);
-    const first = lines[0] || (seg.route_short_name || "Route");
+    const first = lines[0] || (seg.display_name || seg.route_short_name || "Route");
     legendSvg.push(`<rect x="${legendX.toFixed(2)}" y="${(legendY - 10).toFixed(2)}" width="18" height="5" rx="2" fill="${seg.lineColor}" />`);
     legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(first)}</text>`);
     legendY += lineH;
