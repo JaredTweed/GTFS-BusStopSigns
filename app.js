@@ -285,11 +285,13 @@ function splitTextByMaxChars(text, maxChars) {
   return out;
 }
 
-function buildLegendLinesForSegment(seg, maxChars = 86) {
+function buildLegendLinesForSegment(seg, maxChars = 116) {
   const route = (seg?.display_name || seg?.route_short_name || "Route").toString().trim();
   const active = (seg?.active_hours_text || "").toString().trim();
-  if (!active) return splitTextByMaxChars(route, maxChars);
-  return splitTextByMaxChars(`${route} ${active}`.trim(), maxChars);
+  if (!active) return [route];
+  const combined = `${route} ${active}`.trim();
+  if (combined.length <= maxChars) return [combined];
+  return [route, active];
 }
 
 function estimateLegendHeight(segments, maxSegments = 6) {
@@ -2109,19 +2111,37 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
   const lineH = 16;
   const itemGap = 2;
   let legendY = y + h - legendH + 16;
-  ctx.font = "700 12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+  const legendFontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+  const legendFontBold = `700 12px ${legendFontFamily}`;
+  const legendFontRegular = `400 12px ${legendFontFamily}`;
+  const legendMaxChars = 116;
   for (const seg of segments.slice(0, 6)) {
     const lines = buildLegendLinesForSegment(seg);
-    const first = lines[0] || (seg.display_name || seg.route_short_name || "Route");
+    const routeLabel = (seg.display_name || seg.route_short_name || "Route").toString().trim();
+    const activeLabel = (seg.active_hours_text || "").toString().trim();
+    const combined = activeLabel ? `${routeLabel} ${activeLabel}`.trim() : routeLabel;
     const swatchW = 18;
     ctx.fillStyle = seg.lineColor;
     roundRect(ctx, legendX, legendY - 10, swatchW, 5, 2, true, false);
     ctx.fillStyle = "#222222";
-    ctx.fillText(first, legendX + swatchW + 8, legendY);
-    legendY += lineH;
-    for (let i = 1; i < lines.length; i += 1) {
-      ctx.fillText(lines[i], legendX + swatchW + 8, legendY);
+    const textX = legendX + swatchW + 8;
+
+    if (activeLabel && combined.length <= legendMaxChars) {
+      ctx.font = legendFontBold;
+      ctx.fillText(routeLabel, textX, legendY);
+      const routeW = ctx.measureText(routeLabel).width;
+      ctx.font = legendFontRegular;
+      ctx.fillText(` ${activeLabel}`, textX + routeW, legendY);
       legendY += lineH;
+    } else {
+      ctx.font = legendFontBold;
+      ctx.fillText(lines[0] || routeLabel, textX, legendY);
+      legendY += lineH;
+      for (let i = 1; i < lines.length; i += 1) {
+        ctx.font = legendFontRegular;
+        ctx.fillText(lines[i], textX, legendY);
+        legendY += lineH;
+      }
     }
     legendY += itemGap;
     if (legendY > y + h - 4) break;
@@ -2583,15 +2603,24 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes }) {
   const lineH = 16;
   const itemGap = 2;
   let legendY = mapOuterY + mapOuterH - legendHForMap + 16;
+  const legendMaxChars = 116;
   for (const seg of routeSegments.slice(0, 6)) {
     const lines = buildLegendLinesForSegment(seg);
-    const first = lines[0] || (seg.display_name || seg.route_short_name || "Route");
+    const routeLabel = (seg.display_name || seg.route_short_name || "Route").toString().trim();
+    const activeLabel = (seg.active_hours_text || "").toString().trim();
+    const combined = activeLabel ? `${routeLabel} ${activeLabel}`.trim() : routeLabel;
+    const textX = legendX + 26;
     legendSvg.push(`<rect x="${legendX.toFixed(2)}" y="${(legendY - 10).toFixed(2)}" width="18" height="5" rx="2" fill="${seg.lineColor}" />`);
-    legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(first)}</text>`);
-    legendY += lineH;
-    for (let i = 1; i < lines.length; i += 1) {
-      legendSvg.push(`<text x="${(legendX + 26).toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(lines[i])}</text>`);
+    if (activeLabel && combined.length <= legendMaxChars) {
+      legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial"><tspan font-weight="700">${escXml(routeLabel)}</tspan><tspan font-weight="400"> ${escXml(activeLabel)}</tspan></text>`);
       legendY += lineH;
+    } else {
+      legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(lines[0] || routeLabel)}</text>`);
+      legendY += lineH;
+      for (let i = 1; i < lines.length; i += 1) {
+        legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="400" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(lines[i])}</text>`);
+        legendY += lineH;
+      }
     }
     legendY += itemGap;
     if (legendY > mapOuterY + mapOuterH - 4) break;
