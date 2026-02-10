@@ -1241,7 +1241,8 @@ function buildSharedEdges(segments, stop = null, options = {}) {
   }
 
   function appendTraceEvents() {
-    if (!traceOut && !traceOrderOut) return;
+    const emitEvents = !!traceOut;
+    const emitOrder = !!traceOrderOut;
     if (traceOut) traceOut.length = 0;
     if (traceOrderOut) traceOrderOut.length = 0;
     const path = buildTracePath();
@@ -1249,7 +1250,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
 
     const firstOrder = path[0].order.slice();
     const firstLineOrder = firstOrder.map((rid) => lineIdForRoute(rid));
-    const traceEvents = [];
+    const traceEventsByRoute = [];
 
     for (let i = 1; i < path.length; i += 1) {
       const prev = path[i - 1];
@@ -1262,9 +1263,8 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         .map((rid) => ({ rid, idx: prevOrder.indexOf(rid) }))
         .sort((a, b) => a.idx - b.idx)
         .forEach(({ rid, idx }) => {
-          const id = lineIdForRoute(rid);
           const side = sideForIndex(idx, prevOrder.length);
-          traceEvents.push({ id, op: "S", side });
+          traceEventsByRoute.push({ id: rid, op: "S", side });
         });
 
       const mergeRoutes = nextOrder.filter((rid) => !prev.routeIds.includes(rid));
@@ -1272,18 +1272,10 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         .map((rid) => ({ rid, idx: nextOrder.indexOf(rid) }))
         .sort((a, b) => a.idx - b.idx)
         .forEach(({ rid, idx }) => {
-          const id = lineIdForRoute(rid);
           const side = sideForIndex(idx, nextOrder.length);
-          traceEvents.push({ id, op: "M", side });
+          traceEventsByRoute.push({ id: rid, op: "M", side });
         });
     }
-
-    if (traceOut) {
-      traceOut.push({ init: firstLineOrder.slice() });
-      for (const ev of traceEvents) traceOut.push({ ...ev });
-    }
-
-    if (!traceOrderOut) return;
 
     function applyBubble(order, id, side) {
       const idx = order.indexOf(id);
@@ -1357,42 +1349,60 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       });
     }
 
-    const masterOrder = optimizeStartOrder(firstLineOrder, traceEvents);
-    traceOrderOut.push([masterOrder.slice()]);
+    const masterRouteOrder = optimizeStartOrder(firstOrder, traceEventsByRoute);
+    path[0].order = masterRouteOrder.slice();
 
-    const splitSideById = new Map(); // id -> "L" | "R"
+    const displayEvents = traceEventsByRoute.map((ev) => ({
+      id: lineIdForRoute(ev.id),
+      op: ev.op,
+      side: ev.side,
+    }));
+
+    if (emitEvents) {
+      traceOut.push({ init: firstLineOrder.slice() });
+      for (const ev of displayEvents) traceOut.push({ ...ev });
+    }
+
+    if (!emitOrder) return;
+
+    traceOrderOut.push([masterRouteOrder.map((rid) => lineIdForRoute(rid))]);
+
+    const splitSideById = new Map(); // rid -> "L" | "R"
 
     function splitGroupsFromMaster(order, splitSideMap) {
       const left = [];
       const right = [];
       for (let i = 0; i < order.length; i += 1) {
-        const id = order[i];
-        const side = splitSideMap.get(id);
+        const rid = order[i];
+        const side = splitSideMap.get(rid);
         if (!side) continue;
-        if (side === "L") left.push({ id, idx: i });
-        else right.push({ id, idx: i });
+        if (side === "L") left.push({ rid, idx: i });
+        else right.push({ rid, idx: i });
       }
 
       left.sort((a, b) => a.idx - b.idx);
       right.sort((a, b) => b.idx - a.idx);
-      return [...left.map((x) => [x.id]), ...right.map((x) => [x.id])];
+      return [...left.map((x) => [x.rid]), ...right.map((x) => [x.rid])];
     }
 
-    for (const ev of traceEvents) {
-      applyBubble(masterOrder, ev.id, ev.side);
+    for (const ev of traceEventsByRoute) {
+      applyBubble(masterRouteOrder, ev.id, ev.side);
       if (ev.op === "S") splitSideById.set(ev.id, ev.side);
       else if (ev.op === "M") splitSideById.delete(ev.id);
 
       const splitCount = splitSideById.size;
       let main;
       if (ev.op === "S" && splitCount === 1) {
-        main = masterOrder.slice();
+        main = masterRouteOrder.slice();
       } else {
-        main = masterOrder.filter((id) => !splitSideById.has(id));
+        main = masterRouteOrder.filter((rid) => !splitSideById.has(rid));
       }
 
-      const groups = splitGroupsFromMaster(masterOrder, splitSideById);
-      traceOrderOut.push([main, ...groups]);
+      const groups = splitGroupsFromMaster(masterRouteOrder, splitSideById);
+      traceOrderOut.push([
+        main.map((rid) => lineIdForRoute(rid)),
+        ...groups.map((group) => group.map((rid) => lineIdForRoute(rid))),
+      ]);
     }
   }
 
