@@ -2104,6 +2104,7 @@ function buildSharedLaneChains(sharedEdges) {
     const outByNode = new Map();
     const inCount = new Map();
     const outCount = new Map();
+    const undegCount = new Map();
 
     const addNodeIfMissing = (nk) => {
       if (!inCount.has(nk)) inCount.set(nk, 0);
@@ -2122,6 +2123,8 @@ function buildSharedLaneChains(sharedEdges) {
 
       outCount.set(ak, (outCount.get(ak) || 0) + 1);
       inCount.set(bk, (inCount.get(bk) || 0) + 1);
+      undegCount.set(ak, (undegCount.get(ak) || 0) + 1);
+      undegCount.set(bk, (undegCount.get(bk) || 0) + 1);
 
       if (!outByNode.has(ak)) outByNode.set(ak, []);
       outByNode.get(ak).push(i);
@@ -2205,10 +2208,14 @@ function buildSharedLaneChains(sharedEdges) {
       }
 
       if (points.length >= 2) {
+        const startNodeKey = pointKey(points[0]);
+        const endNodeKey = pointKey(points[points.length - 1]);
         chains.push({
           points,
           orderedRouteIds: first.orderedIds.slice(),
           colors: first.colors.slice(),
+          roundCapStart: (undegCount.get(startNodeKey) || 0) <= 1,
+          roundCapEnd: (undegCount.get(endNodeKey) || 0) <= 1,
         });
       }
     };
@@ -2417,6 +2424,8 @@ function drawStripedPolylineOnCanvas(ctx, pixelPoints, colors, width, options = 
   const laneStep = Math.max(2, width / colors.length);
   const laneOverlapPx = Number.isFinite(options.laneOverlapPx) ? options.laneOverlapPx : 0;
   const laneWidth = Math.max(2, laneStep + laneOverlapPx);
+  const roundCapStart = !!options.roundCapStart;
+  const roundCapEnd = !!options.roundCapEnd;
   for (let i = 0; i < colors.length; i += 1) {
     const off = ((i - ((colors.length - 1) / 2)) * laneStep);
     let shifted = offsetPolylinePixels(centerPoints, off);
@@ -2432,6 +2441,23 @@ function drawStripedPolylineOnCanvas(ctx, pixelPoints, colors, width, options = 
       else ctx.lineTo(shifted[p].x, shifted[p].y);
     }
     ctx.stroke();
+
+    if (lineCap === "butt" && (roundCapStart || roundCapEnd)) {
+      const r = laneWidth / 2;
+      ctx.fillStyle = colors[i];
+      if (roundCapStart) {
+        const s = shifted[0];
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (roundCapEnd) {
+        const e = shifted[shifted.length - 1];
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
   }
 }
 
@@ -2938,6 +2964,8 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
       lineCap: "butt",
       simplifyTolerancePx: SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX,
       laneOverlapPx: SIGN_ROUTE_GROUP_LANE_OVERLAP_PX,
+      roundCapStart: !!chain.roundCapStart,
+      roundCapEnd: !!chain.roundCapEnd,
     });
   }
 
@@ -3465,6 +3493,15 @@ async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputSca
       if (shifted.length < 2) continue;
       const d = shifted.map((p, idx) => `${idx === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
       sharedLaneSvg.push(`<path d="${d}" fill="none" stroke="${chain.colors[i]}" stroke-width="${laneWidth.toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round" />`);
+      const r = (laneWidth / 2).toFixed(2);
+      if (chain.roundCapStart) {
+        const s = shifted[0];
+        sharedLaneSvg.push(`<circle cx="${s.x.toFixed(2)}" cy="${s.y.toFixed(2)}" r="${r}" fill="${chain.colors[i]}" />`);
+      }
+      if (chain.roundCapEnd) {
+        const e = shifted[shifted.length - 1];
+        sharedLaneSvg.push(`<circle cx="${e.x.toFixed(2)}" cy="${e.y.toFixed(2)}" r="${r}" fill="${chain.colors[i]}" />`);
+      }
     }
   }
 
