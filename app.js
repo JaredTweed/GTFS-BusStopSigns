@@ -69,7 +69,17 @@ const MAP_TILE_SUBDOMAINS = "abcd";
 const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO";
 const SIGN_MAP_ZOOM_IN_STEPS = 1;
 const SIGN_MAP_ZOOM_FIT_STEP = 0.2;
-const SIGN_BASEMAP_TILE_ZOOM_OFFSET = 1;
+const SIGN_BASEMAP_TILE_ZOOM_OFFSET = 4;
+const SIGN_VECTOR_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
+const SIGN_VECTOR_ROAD_LABEL_SIZE_SCALE = 10;
+const SIGN_VECTOR_ROAD_LABEL_DENSITY_SCALE = 0.1;
+const SIGN_VECTOR_ROAD_LABEL_MINZOOM_SHIFT = -10;
+const SIGN_VECTOR_ROAD_LABEL_COLOR = "#4b5563";
+const SIGN_VECTOR_ROAD_LABEL_HALO_COLOR = "#ffffff";
+const SIGN_VECTOR_ROAD_LABEL_HALO_WIDTH = 1.2;
+const SIGN_VECTOR_NON_ROAD_LABEL_SIZE_SCALE = 1.48;
+const SIGN_VECTOR_GL_ZOOM_OFFSET = -1;
+const SIGN_BASEMAP_OPACITY = 0.86;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
@@ -81,6 +91,10 @@ const PREVIEW_ZOOM_STEP = 1.12;
 let previewZoomScale = 1;
 let previewZoomOriginX = 50;
 let previewZoomOriginY = 50;
+let signVectorStylePromise = null;
+let signVectorMapHost = null;
+let signVectorMap = null;
+let signVectorUnavailable = false;
 
 function applyPreviewZoom() {
   if (!ui.signCanvas) return;
@@ -2352,6 +2366,198 @@ function computeSignMapViewWindow(bounds, width, height, tileZoomOffset = 0) {
   };
 }
 
+function deepCloneJson(value) {
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
+}
+
+function scaleTextSizeSpec(spec, factor) {
+  if (typeof spec === "number") return spec * factor;
+  if (!Array.isArray(spec)) return spec;
+
+  const out = spec.slice();
+  const op = out[0];
+  if (op === "interpolate") {
+    for (let i = 4; i < out.length; i += 2) {
+      if (typeof out[i] === "number") out[i] *= factor;
+    }
+    return out;
+  }
+  if (op === "step") {
+    for (let i = 2; i < out.length; i += 2) {
+      if (typeof out[i] === "number") out[i] *= factor;
+    }
+    return out;
+  }
+  return out;
+}
+
+function scaledMinZoom(minzoom, delta) {
+  if (!Number.isFinite(minzoom)) return minzoom;
+  return Math.max(0, minzoom + delta);
+}
+
+function isLikelyRoadLabelLayer(layer) {
+  const id = String(layer?.id || "").toLowerCase();
+  const sourceLayer = String(layer?.["source-layer"] || "").toLowerCase();
+  const txt = `${id} ${sourceLayer}`;
+  const hasRoadToken = /road|street|highway|motorway|trunk|primary|secondary|tertiary/.test(txt);
+  const isShield = /shield|ref|number/.test(txt);
+  return hasRoadToken && !isShield;
+}
+
+async function loadSignVectorStyle() {
+  if (signVectorStylePromise) return signVectorStylePromise;
+  signVectorStylePromise = (async () => {
+    const res = await fetch(SIGN_VECTOR_STYLE_URL, { cache: "force-cache" });
+    if (!res.ok) throw new Error(`Vector style load failed: ${res.status}`);
+    const baseStyle = await res.json();
+    const style = deepCloneJson(baseStyle);
+    if (!Array.isArray(style.layers)) return style;
+
+    for (const layer of style.layers) {
+      if (!layer || layer.type !== "symbol") continue;
+      const layout = layer.layout || {};
+      if (layout["text-field"] == null) continue;
+      const isRoadLabel = isLikelyRoadLabelLayer(layer);
+      const sizeScale = isRoadLabel ? SIGN_VECTOR_ROAD_LABEL_SIZE_SCALE : SIGN_VECTOR_NON_ROAD_LABEL_SIZE_SCALE;
+      const scaledTextSize = scaleTextSizeSpec(
+        layout["text-size"] ?? 12,
+        sizeScale,
+      );
+
+      const nextLayout = {
+        ...layout,
+        "text-size": scaledTextSize,
+      };
+      if (isRoadLabel) {
+        // Increase road-name density without changing route geometry zoom.
+        nextLayout["text-allow-overlap"] = true;
+        nextLayout["text-ignore-placement"] = true;
+        if (typeof nextLayout["symbol-spacing"] === "number") {
+          nextLayout["symbol-spacing"] = Math.max(40, nextLayout["symbol-spacing"] / SIGN_VECTOR_ROAD_LABEL_DENSITY_SCALE);
+        } else {
+          nextLayout["symbol-spacing"] = Math.max(40, 80 / SIGN_VECTOR_ROAD_LABEL_DENSITY_SCALE);
+        }
+
+        layer.paint = {
+          ...(layer.paint || {}),
+          "text-color": SIGN_VECTOR_ROAD_LABEL_COLOR,
+          "text-halo-color": SIGN_VECTOR_ROAD_LABEL_HALO_COLOR,
+          "text-halo-width": SIGN_VECTOR_ROAD_LABEL_HALO_WIDTH,
+        };
+      }
+
+      layer.layout = nextLayout;
+      if (isRoadLabel && Number.isFinite(layer.minzoom)) {
+        layer.minzoom = scaledMinZoom(layer.minzoom, SIGN_VECTOR_ROAD_LABEL_MINZOOM_SHIFT);
+      }
+    }
+
+    return style;
+  })();
+  return signVectorStylePromise;
+}
+
+function ensureSignVectorMapHost(width, height) {
+  const cssW = Math.max(1, Math.round(width));
+  const cssH = Math.max(1, Math.round(height));
+  if (!signVectorMapHost) {
+    const host = document.createElement("div");
+    host.id = "signVectorMapHost";
+    host.style.position = "fixed";
+    host.style.left = "-20000px";
+    host.style.top = "0";
+    host.style.opacity = "0";
+    host.style.pointerEvents = "none";
+    host.style.zIndex = "-1";
+    host.style.overflow = "hidden";
+    signVectorMapHost = host;
+    document.body.appendChild(signVectorMapHost);
+  }
+  signVectorMapHost.style.width = `${cssW}px`;
+  signVectorMapHost.style.height = `${cssH}px`;
+  return signVectorMapHost;
+}
+
+function waitForMapIdle(mapObj, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      mapObj.off("idle", onIdle);
+      resolve();
+    };
+    const onIdle = () => finish();
+    const timer = setTimeout(finish, timeoutMs);
+    mapObj.once("idle", onIdle);
+
+    if (mapObj.loaded() && typeof mapObj.areTilesLoaded === "function" && mapObj.areTilesLoaded()) {
+      requestAnimationFrame(() => finish());
+    }
+  });
+}
+
+async function ensureSignVectorMap(width, height) {
+  if (signVectorUnavailable) return null;
+  const maplibre = window.maplibregl;
+  if (!maplibre?.Map) return null;
+
+  const host = ensureSignVectorMapHost(width, height);
+  if (!signVectorMap) {
+    const style = await loadSignVectorStyle();
+    signVectorMap = new maplibre.Map({
+      container: host,
+      style,
+      interactive: false,
+      attributionControl: false,
+      preserveDrawingBuffer: true,
+      fadeDuration: 0,
+      pitch: 0,
+      bearing: 0,
+    });
+    await waitForMapIdle(signVectorMap);
+  } else {
+    signVectorMap.resize();
+  }
+  return signVectorMap;
+}
+
+async function renderVectorBasemapSnapshot({ bounds, width, height }) {
+  if (signVectorUnavailable) return null;
+  try {
+    const mapObj = await ensureSignVectorMap(width, height);
+    if (!mapObj) return null;
+
+    const view = computeSignMapViewWindow(bounds, width, height, 0);
+    const glZoom = Math.max(0, view.renderZoom + SIGN_VECTOR_GL_ZOOM_OFFSET);
+    mapObj.resize();
+    mapObj.jumpTo({
+      center: [view.centerLon, view.centerLat],
+      zoom: glZoom,
+      bearing: 0,
+      pitch: 0,
+    });
+    await waitForMapIdle(mapObj);
+
+    const src = mapObj.getCanvas();
+    if (!src || src.width <= 0 || src.height <= 0) return null;
+
+    const snapshot = document.createElement("canvas");
+    snapshot.width = src.width;
+    snapshot.height = src.height;
+    const sctx = snapshot.getContext("2d");
+    sctx.drawImage(src, 0, 0);
+    return { canvas: snapshot, view };
+  } catch (err) {
+    console.warn("Vector sign basemap unavailable, using raster fallback.", err);
+    signVectorUnavailable = true;
+    return null;
+  }
+}
+
 function tileKey(z, x, y) {
   return `${z}/${x}/${y}`;
 }
@@ -2388,7 +2594,7 @@ function loadTileImage(z, x, y, kind = "base") {
   return p;
 }
 
-async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
+async function drawRasterBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
   const view = computeSignMapViewWindow(bounds, w, h, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
   const {
     tileZoom,
@@ -2437,6 +2643,18 @@ async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
     }
   }
   await Promise.all(labelDraws);
+}
+
+async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
+  const vectorSnapshot = await renderVectorBasemapSnapshot({ bounds, width: w, height: h });
+  if (vectorSnapshot?.canvas) {
+    ctx.save();
+    ctx.globalAlpha = SIGN_BASEMAP_OPACITY;
+    ctx.drawImage(vectorSnapshot.canvas, x, y, w, h);
+    ctx.restore();
+    return;
+  }
+  await drawRasterBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds });
 }
 
 function makeCanvasProjector(bounds, drawX, drawY, drawW, drawH) {
@@ -2931,7 +3149,7 @@ function escXml(s) {
     .replaceAll("'", "&apos;");
 }
 
-function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1 }) {
+async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1 }) {
   const exportScale = Math.max(1, Math.min(3, Number(outputScale) || 1));
   const svgOutW = Math.round(900 * exportScale);
   const svgOutH = Math.round(1200 * exportScale);
@@ -2964,18 +3182,6 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1
   const drawH = mapOuterH - (mapInnerPad * 2) - legendHForMap;
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
 
-  const view = computeSignMapViewWindow(bounds, drawW, drawH, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
-  const {
-    tileZoom,
-    left,
-    top,
-    tileSize,
-    x0,
-    y0,
-    x1,
-    y1,
-  } = view;
-
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
   const stopPt = (stopLat != null && stopLon != null) ? project(stopLat, stopLon) : null;
@@ -2984,17 +3190,44 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1
 
   const mapClipId = "mapClip";
   const mapTileSvg = [];
-  for (let tx = x0; tx <= x1; tx += 1) {
-    for (let ty = y0; ty <= y1; ty += 1) {
-      const n = 2 ** tileZoom;
-      if (ty < 0 || ty >= n) continue;
-      const txx = ((tx % n) + n) % n;
-      const px = drawX + ((tx * tileSize) - left);
-      const py = drawY + ((ty * tileSize) - top);
-      const baseHref = expandTileTemplate(MAP_TILE_BASE_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a", retinaSuffix: svgTileRetinaSuffix });
-      const labelsHref = expandTileTemplate(MAP_TILE_LABELS_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a", retinaSuffix: svgTileRetinaSuffix });
-      mapTileSvg.push(`<image href="${baseHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="${tileSize.toFixed(2)}" height="${tileSize.toFixed(2)}" opacity="0.88" />`);
-      mapTileSvg.push(`<image href="${labelsHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="${tileSize.toFixed(2)}" height="${tileSize.toFixed(2)}" opacity="1" />`);
+  let vectorMapHref = "";
+  const vectorSnapshot = await renderVectorBasemapSnapshot({ bounds, width: drawW, height: drawH });
+  if (vectorSnapshot?.canvas) {
+    try {
+      vectorMapHref = vectorSnapshot.canvas.toDataURL("image/png");
+    } catch {
+      vectorMapHref = "";
+    }
+  }
+
+  if (vectorMapHref) {
+    mapTileSvg.push(
+      `<image href="${vectorMapHref}" x="${drawX.toFixed(2)}" y="${drawY.toFixed(2)}" width="${drawW.toFixed(2)}" height="${drawH.toFixed(2)}" opacity="${SIGN_BASEMAP_OPACITY}" />`,
+    );
+  } else {
+    const view = computeSignMapViewWindow(bounds, drawW, drawH, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
+    const {
+      tileZoom,
+      left,
+      top,
+      tileSize,
+      x0,
+      y0,
+      x1,
+      y1,
+    } = view;
+    for (let tx = x0; tx <= x1; tx += 1) {
+      for (let ty = y0; ty <= y1; ty += 1) {
+        const n = 2 ** tileZoom;
+        if (ty < 0 || ty >= n) continue;
+        const txx = ((tx % n) + n) % n;
+        const px = drawX + ((tx * tileSize) - left);
+        const py = drawY + ((ty * tileSize) - top);
+        const baseHref = expandTileTemplate(MAP_TILE_BASE_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a", retinaSuffix: svgTileRetinaSuffix });
+        const labelsHref = expandTileTemplate(MAP_TILE_LABELS_URL, { z: tileZoom, x: txx, y: ty, subdomain: "a", retinaSuffix: svgTileRetinaSuffix });
+        mapTileSvg.push(`<image href="${baseHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="${tileSize.toFixed(2)}" height="${tileSize.toFixed(2)}" opacity="0.88" />`);
+        mapTileSvg.push(`<image href="${labelsHref}" x="${px.toFixed(2)}" y="${py.toFixed(2)}" width="${tileSize.toFixed(2)}" height="${tileSize.toFixed(2)}" opacity="1" />`);
+      }
     }
   }
 
@@ -3129,7 +3362,8 @@ function openStop(stop) {
   const drawW = mapOuterW - (mapInnerPad * 2);
   const drawH = mapOuterH - (mapInnerPad * 2) - legendH;
   const bounds = getRouteBounds(stop, debugSegments);
-  const signMapView = computeSignMapViewWindow(bounds, drawW, drawH, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
+  const signMapView = computeSignMapViewWindow(bounds, drawW, drawH, 0);
+  const rasterFallbackView = computeSignMapViewWindow(bounds, drawW, drawH, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
   console.log("Shared route ordering events", {
     stop_id: stop.stop_id,
     stop_code: stop.stop_code || null,
@@ -3155,9 +3389,22 @@ function openStop(stop) {
     zoom: {
       projection_render_zoom: signMapView.renderZoom,
       basemap_base_tile_zoom: signMapView.baseTileZoom,
-      basemap_tile_zoom_offset: SIGN_BASEMAP_TILE_ZOOM_OFFSET,
+      basemap_tile_zoom_offset: 0,
       basemap_tile_zoom_used: signMapView.tileZoom,
       basemap_scale: signMapView.scale,
+    },
+    basemap_renderer: {
+      preferred: "vector-maplibre",
+      vector_style_url: SIGN_VECTOR_STYLE_URL,
+      vector_road_label_size_scale: SIGN_VECTOR_ROAD_LABEL_SIZE_SCALE,
+      vector_road_label_density_scale: SIGN_VECTOR_ROAD_LABEL_DENSITY_SCALE,
+      vector_road_label_minzoom_shift: SIGN_VECTOR_ROAD_LABEL_MINZOOM_SHIFT,
+      vector_road_label_color: SIGN_VECTOR_ROAD_LABEL_COLOR,
+      vector_gl_zoom_offset: SIGN_VECTOR_GL_ZOOM_OFFSET,
+      vector_basemap_opacity: SIGN_BASEMAP_OPACITY,
+      fallback: "raster-tiles",
+      fallback_tile_zoom_offset: SIGN_BASEMAP_TILE_ZOOM_OFFSET,
+      fallback_tile_zoom_used: rasterFallbackView.tileZoom,
     },
     tile_window: {
       x0: signMapView.x0,
@@ -3221,7 +3468,7 @@ ui.downloadBtn.addEventListener("click", async () => {
   }
 });
 
-ui.downloadSvgBtn.addEventListener("click", () => {
+ui.downloadSvgBtn.addEventListener("click", async () => {
   const stop = selectedStop;
   if (!stop) return;
 
@@ -3229,7 +3476,14 @@ ui.downloadSvgBtn.addEventListener("click", () => {
   const maxRoutes = Math.max(0, getRouteSummaryForStop(stop, directionFilter).length);
   const outputScale = FIXED_EXPORT_SCALE;
   const items = getRouteSummaryForStop(stop, directionFilter);
-  const svg = buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale });
+  let svg = "";
+  try {
+    svg = await buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale });
+  } catch (err) {
+    console.error(err);
+    alert("Failed to export SVG. Try again in a moment.");
+    return;
+  }
 
   const name = (stop.stop_name || "bus_stop").toString().replace(/[^\w\-]+/g, "_").slice(0, 50);
   const code = (stop.stop_code || stop.stop_id || "").toString().replace(/[^\w\-]+/g, "_").slice(0, 30);
@@ -3298,6 +3552,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
   lastWeekWeekdayByDateKey = new Map();
   hasServiceCalendarData = false;
   feedUpdatedDateLabel = "";
+  signVectorUnavailable = false;
   selectedStop = null;
   selectedStopRouteSummary = null;
   routeSummaryCache = new Map();
