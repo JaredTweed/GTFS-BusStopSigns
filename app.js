@@ -57,6 +57,7 @@ let signRenderToken = 0;
 const tileImageCache = new Map();
 let routeSummaryCache = new Map(); // `${stop_id}::${direction}` -> summary array
 let bootGeneration = 0;
+let feedUpdatedDateLabel = "";
 
 const MAP_LINE_PALETTE = [
   "#e63946", "#1d3557", "#2a9d8f", "#f4a261", "#6a4c93",
@@ -155,6 +156,70 @@ function parseGtfsDateKey(v) {
   if (!/^\d{8}$/.test(raw)) return null;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) ? n : null;
+}
+
+function formatDateKeyForDisplay(dateKey) {
+  if (!Number.isFinite(dateKey)) return "";
+  const raw = String(Math.trunc(dateKey)).padStart(8, "0");
+  const y = Number.parseInt(raw.slice(0, 4), 10);
+  const m = Number.parseInt(raw.slice(4, 6), 10);
+  const d = Number.parseInt(raw.slice(6, 8), 10);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return "";
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (
+    dt.getUTCFullYear() !== y
+    || (dt.getUTCMonth() + 1) !== m
+    || dt.getUTCDate() !== d
+  ) return "";
+  return dt.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function extractDateKeysFromText(text) {
+  const src = String(text || "");
+  const matches = src.match(/\d{8}/g) || [];
+  const out = [];
+  for (const token of matches) {
+    const key = parseGtfsDateKey(token);
+    if (key != null) out.push(key);
+  }
+  return out;
+}
+
+function deriveFeedUpdatedDateLabel(feedInfoRows) {
+  if (!Array.isArray(feedInfoRows) || feedInfoRows.length === 0) return "";
+  const row = feedInfoRows[0] || {};
+
+  const candidates = [];
+  const versionKeys = extractDateKeysFromText(row.feed_version);
+  for (const key of versionKeys) candidates.push(key);
+
+  if (candidates.length === 0) {
+    const start = parseGtfsDateKey(row.feed_start_date);
+    if (start != null) candidates.push(start);
+  }
+  if (candidates.length === 0) {
+    const end = parseGtfsDateKey(row.feed_end_date);
+    if (end != null) candidates.push(end);
+  }
+  if (candidates.length === 0) return "";
+
+  candidates.sort((a, b) => b - a);
+  for (const key of candidates) {
+    const label = formatDateKeyForDisplay(key);
+    if (label) return label;
+  }
+  return "";
+}
+
+function signFooterText() {
+  const base = "Generated from GTFS • Created by Jared Tweed";
+  if (!feedUpdatedDateLabel) return base;
+  return `${base} • Updated ${feedUpdatedDateLabel}`;
 }
 
 function getLast7DatesInfo() {
@@ -2819,7 +2884,7 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken, 
   // Footer
   ctx.fillStyle = "#888888";
   ctx.font = "600 16px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  ctx.fillText("Generated from GTFS • Created by Jared Tweed", pad, H - 40);
+  ctx.fillText(signFooterText(), pad, H - 40);
 }
 
 function escXml(s) {
@@ -2985,7 +3050,7 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1
   ${sharedLaneSvg.join("")}
   ${stopPt ? `<circle cx="${stopPt[0].toFixed(2)}" cy="${stopPt[1].toFixed(2)}" r="6" fill="#ffffff" stroke="#111111" stroke-width="2" />` : ""}
   ${legendSvg.join("")}
-  <text x="${pad}" y="${H - 40}" fill="#888888" font-size="16" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Generated from GTFS • Created by Jared Tweed</text>
+  <text x="${pad}" y="${H - 40}" fill="#888888" font-size="16" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(signFooterText())}</text>
 </svg>`;
 }
 
@@ -3161,6 +3226,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
   serviceActiveDatesLastWeekById = new Map();
   lastWeekWeekdayByDateKey = new Map();
   hasServiceCalendarData = false;
+  feedUpdatedDateLabel = "";
   selectedStop = null;
   selectedStopRouteSummary = null;
   routeSummaryCache = new Map();
@@ -3174,6 +3240,16 @@ async function boot({ zipUrl, zipFile, zipName }) {
     setProgress(10, "Parsing stops.txt…");
     stops = await parseCSVFromZip(zip, "stops.txt");
     ui.stopsCount.textContent = niceInt(stops.length);
+    if (generationAtStart !== bootGeneration) return;
+
+    if (zip.file("feed_info.txt")) {
+      try {
+        const feedInfoRows = await parseCSVFromZip(zip, "feed_info.txt");
+        feedUpdatedDateLabel = deriveFeedUpdatedDateLabel(feedInfoRows);
+      } catch (err) {
+        console.warn("Failed to parse feed_info.txt for update date.", err);
+      }
+    }
     if (generationAtStart !== bootGeneration) return;
 
     // 2) start shapes parsing in worker so it can overlap with later GTFS steps.
