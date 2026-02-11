@@ -69,6 +69,7 @@ const MAP_TILE_SUBDOMAINS = "abcd";
 const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO";
 const SIGN_MAP_ZOOM_IN_STEPS = 1;
 const SIGN_MAP_ZOOM_FIT_STEP = 0.5;
+const SIGN_BASEMAP_TILE_ZOOM_OFFSET = 1;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
@@ -2311,6 +2312,46 @@ function chooseMapZoom(bounds, width, height) {
   return Math.min(19, SIGN_MAP_ZOOM_IN_STEPS);
 }
 
+function computeSignMapViewWindow(bounds, width, height, tileZoomOffset = 0) {
+  const renderZoom = chooseMapZoom(bounds, width, height);
+  const baseTileZoom = Math.max(0, Math.floor(renderZoom));
+  const tileZoom = Math.max(0, Math.min(19, baseTileZoom + tileZoomOffset));
+  const scale = 2 ** (renderZoom - tileZoom);
+  const centerLat = (bounds.minLat + bounds.maxLat) / 2;
+  const centerLon = (bounds.minLon + bounds.maxLon) / 2;
+  const centerTileWorld = latLonToWorld(centerLat, centerLon, tileZoom);
+  const centerWorld = { x: centerTileWorld.x * scale, y: centerTileWorld.y * scale };
+  const left = centerWorld.x - (width / 2);
+  const top = centerWorld.y - (height / 2);
+  const right = centerWorld.x + (width / 2);
+  const bottom = centerWorld.y + (height / 2);
+  const tileSize = 256 * scale;
+  const x0 = Math.floor(left / tileSize);
+  const y0 = Math.floor(top / tileSize);
+  const x1 = Math.floor(right / tileSize);
+  const y1 = Math.floor(bottom / tileSize);
+
+  return {
+    renderZoom,
+    baseTileZoom,
+    tileZoom,
+    tileZoomOffset,
+    scale,
+    centerLat,
+    centerLon,
+    centerWorld,
+    left,
+    top,
+    right,
+    bottom,
+    tileSize,
+    x0,
+    y0,
+    x1,
+    y1,
+  };
+}
+
 function tileKey(z, x, y) {
   return `${z}/${x}/${y}`;
 }
@@ -2348,23 +2389,17 @@ function loadTileImage(z, x, y, kind = "base") {
 }
 
 async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
-  const renderZoom = chooseMapZoom(bounds, w, h);
-  const tileZoom = Math.max(0, Math.floor(renderZoom));
-  const scale = 2 ** (renderZoom - tileZoom);
-  const centerLat = (bounds.minLat + bounds.maxLat) / 2;
-  const centerLon = (bounds.minLon + bounds.maxLon) / 2;
-  const centerTileWorld = latLonToWorld(centerLat, centerLon, tileZoom);
-  const centerWorld = { x: centerTileWorld.x * scale, y: centerTileWorld.y * scale };
-  const left = centerWorld.x - (w / 2);
-  const top = centerWorld.y - (h / 2);
-  const right = centerWorld.x + (w / 2);
-  const bottom = centerWorld.y + (h / 2);
-
-  const tileSize = 256 * scale;
-  const x0 = Math.floor(left / tileSize);
-  const y0 = Math.floor(top / tileSize);
-  const x1 = Math.floor(right / tileSize);
-  const y1 = Math.floor(bottom / tileSize);
+  const view = computeSignMapViewWindow(bounds, w, h, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
+  const {
+    tileZoom,
+    left,
+    top,
+    tileSize,
+    x0,
+    y0,
+    x1,
+    y1,
+  } = view;
 
   const draws = [];
   for (let tx = x0; tx <= x1; tx += 1) {
@@ -2929,22 +2964,17 @@ function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1
   const drawH = mapOuterH - (mapInnerPad * 2) - legendHForMap;
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
 
-  const renderZoom = chooseMapZoom(bounds, drawW, drawH);
-  const tileZoom = Math.max(0, Math.floor(renderZoom));
-  const scale = 2 ** (renderZoom - tileZoom);
-  const centerLat = (bounds.minLat + bounds.maxLat) / 2;
-  const centerLon = (bounds.minLon + bounds.maxLon) / 2;
-  const centerTileWorld = latLonToWorld(centerLat, centerLon, tileZoom);
-  const centerWorld = { x: centerTileWorld.x * scale, y: centerTileWorld.y * scale };
-  const left = centerWorld.x - (drawW / 2);
-  const top = centerWorld.y - (drawH / 2);
-  const right = centerWorld.x + (drawW / 2);
-  const bottom = centerWorld.y + (drawH / 2);
-  const tileSize = 256 * scale;
-  const x0 = Math.floor(left / tileSize);
-  const y0 = Math.floor(top / tileSize);
-  const x1 = Math.floor(right / tileSize);
-  const y1 = Math.floor(bottom / tileSize);
+  const view = computeSignMapViewWindow(bounds, drawW, drawH, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
+  const {
+    tileZoom,
+    left,
+    top,
+    tileSize,
+    x0,
+    y0,
+    x1,
+    y1,
+  } = view;
 
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
@@ -3084,6 +3114,22 @@ function openStop(stop) {
   const overlapEvents = [];
   const overlapOrder = [];
   buildSharedEdges(debugSegments, stop, { traceOut: overlapEvents, traceOrderOut: overlapOrder });
+
+  const signW = 900;
+  const signH = 1200;
+  const signPad = 50;
+  const headerH = 170;
+  const mapTop = headerH + 30;
+  const mapY = mapTop + 6;
+  const footerY = signH - 40;
+  const mapOuterH = Math.max(220, (footerY - mapY) - 18);
+  const mapOuterW = signW - (signPad * 2);
+  const mapInnerPad = 18;
+  const legendH = Math.min(220, estimateLegendHeight(debugSegments, 6));
+  const drawW = mapOuterW - (mapInnerPad * 2);
+  const drawH = mapOuterH - (mapInnerPad * 2) - legendH;
+  const bounds = getRouteBounds(stop, debugSegments);
+  const signMapView = computeSignMapViewWindow(bounds, drawW, drawH, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
   console.log("Shared route ordering events", {
     stop_id: stop.stop_id,
     stop_code: stop.stop_code || null,
@@ -3093,6 +3139,42 @@ function openStop(stop) {
     events: overlapEvents,
     order: overlapOrder,
   });
+  console.log("Sign map render details", {
+    stop_id: stop.stop_id,
+    stop_code: stop.stop_code || null,
+    stop_name: stop.stop_name || "",
+    route_count: debugSegments.length,
+    bounds,
+    draw_area: {
+      width: drawW,
+      height: drawH,
+      legend_height: legendH,
+      map_outer_width: mapOuterW,
+      map_outer_height: mapOuterH,
+    },
+    zoom: {
+      projection_render_zoom: signMapView.renderZoom,
+      basemap_base_tile_zoom: signMapView.baseTileZoom,
+      basemap_tile_zoom_offset: SIGN_BASEMAP_TILE_ZOOM_OFFSET,
+      basemap_tile_zoom_used: signMapView.tileZoom,
+      basemap_scale: signMapView.scale,
+    },
+    tile_window: {
+      x0: signMapView.x0,
+      y0: signMapView.y0,
+      x1: signMapView.x1,
+      y1: signMapView.y1,
+      tile_size_px: signMapView.tileSize,
+      left: signMapView.left,
+      top: signMapView.top,
+      right: signMapView.right,
+      bottom: signMapView.bottom,
+    },
+    center: {
+      lat: signMapView.centerLat,
+      lon: signMapView.centerLon,
+    },
+  });
 
   drawSign({
     stop,
@@ -3100,6 +3182,7 @@ function openStop(stop) {
     directionFilter,
     maxRoutes,
     renderToken,
+    outputScale: FIXED_EXPORT_SCALE,
   }).catch((err) => console.error("Sign render failed", err));
 }
 
@@ -3132,18 +3215,6 @@ ui.downloadBtn.addEventListener("click", async () => {
     a.download = filename;
     a.href = canvas.toDataURL("image/png");
     a.click();
-
-    if (outputScale !== 1) {
-      const previewToken = ++signRenderToken;
-      drawSign({
-        stop,
-        items,
-        directionFilter,
-        maxRoutes,
-        renderToken: previewToken,
-        outputScale: 1,
-      }).catch((err) => console.error("Sign render failed", err));
-    }
   } catch (err) {
     console.error(err);
     alert("Failed to export PNG. Try again in a moment.");
