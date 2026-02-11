@@ -1,5 +1,6 @@
-html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; color: #111; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+:root { --app-font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+html, body { height: 100%; margin: 0; font-family: var(--app-font-family); color: #111; }
+body, button, input, select, textarea, label, code, .leaflet-container, .leaflet-control, .leaflet-tooltip { font-family: var(--app-font-family); }
 .muted { color: #666; }
 .small { font-size: 12px; line-height: 1.35; }
 
