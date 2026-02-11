@@ -274,7 +274,7 @@ function isCurrentFeedUpToDateWithDownloadLink() {
   return feedUpdatedDateKey === linkDateKey;
 }
 
-function setUpdatesUi({ showButton = false, showStatus = false, statusText = "GTFS Up To Date", buttonText = "Download Updated GTFS File", disableButton = false } = {}) {
+function setUpdatesUi({ showButton = false, showStatus = false, statusText = "GTFS Uploaded", buttonText = "Download Updated GTFS File", disableButton = false } = {}) {
   if (ui.reloadBtn) {
     ui.reloadBtn.style.display = showButton ? "" : "none";
     ui.reloadBtn.textContent = buttonText;
@@ -3718,7 +3718,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
       addStopsToMap();
       setProgress(100, "Ready. Click a stop.");
       if (isCurrentFeedUpToDateWithDownloadLink()) {
-        setUpdatesUi({ showButton: false, showStatus: true, statusText: "GTFS Up To Date" });
+        setUpdatesUi({ showButton: false, showStatus: true, statusText: "GTFS Uploaded" });
       } else {
         setUpdatesUi({ showButton: true, showStatus: false, buttonText: "Download Updated GTFS File", disableButton: false });
       }
@@ -3726,15 +3726,29 @@ async function boot({ zipUrl, zipFile, zipName }) {
       return;
     }
 
-    // 4) routes + trips + calendar (required for worker summary build)
-    setProgress(40, "Parsing routes.txt…");
-    const routes = await parseCSVFromZip(zip, "routes.txt");
-    for (const r of routes) routesById.set(r.route_id, r);
-    ui.routesCount.textContent = niceInt(routesById.size);
+    // 4) routes + trips + calendar + stop_times buffer (parallelized for faster uploads)
+    setProgress(40, "Parsing routes/trips/calendar…");
+    const stopTimesFile = zip.file("stop_times.txt");
+    if (!stopTimesFile) throw new Error("Missing stop_times.txt in GTFS zip");
+
+    const routesPromise = parseCSVFromZip(zip, "routes.txt");
+    const tripsPromise = parseCSVFromZip(zip, "trips.txt");
+    const calendarPromise = zip.file("calendar.txt") ? parseCSVFromZip(zip, "calendar.txt") : Promise.resolve([]);
+    const calendarDatesPromise = zip.file("calendar_dates.txt") ? parseCSVFromZip(zip, "calendar_dates.txt") : Promise.resolve([]);
+    const stopTimesBufferPromise = stopTimesFile.async("arraybuffer");
+
+    const [routes, trips, calendarRows, calendarDateRows, stopTimesBuffer] = await Promise.all([
+      routesPromise,
+      tripsPromise,
+      calendarPromise,
+      calendarDatesPromise,
+      stopTimesBufferPromise,
+    ]);
     if (generationAtStart !== bootGeneration) return;
 
-    setProgress(48, "Parsing trips.txt…");
-    const trips = await parseCSVFromZip(zip, "trips.txt");
+    for (const r of routes) routesById.set(r.route_id, r);
+    ui.routesCount.textContent = niceInt(routesById.size);
+
     for (const t of trips) {
       tripsById.set(t.trip_id, {
         route_id: t.route_id,
@@ -3745,13 +3759,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
       });
     }
     ui.tripsCount.textContent = niceInt(tripsById.size);
-    if (generationAtStart !== bootGeneration) return;
 
-    setProgress(53, "Parsing service calendar…");
-    let calendarRows = [];
-    let calendarDateRows = [];
-    if (zip.file("calendar.txt")) calendarRows = await parseCSVFromZip(zip, "calendar.txt");
-    if (zip.file("calendar_dates.txt")) calendarDateRows = await parseCSVFromZip(zip, "calendar_dates.txt");
     hasServiceCalendarData = calendarRows.length > 0 || calendarDateRows.length > 0;
     if (hasServiceCalendarData) {
       serviceActiveDatesLastWeekById = buildServiceActiveDatesLastWeek(calendarRows, calendarDateRows);
@@ -3760,10 +3768,6 @@ async function boot({ zipUrl, zipFile, zipName }) {
 
     // 5) stop_times worker path first (multithreaded)
     setProgress(55, "Indexing stop_times.txt…");
-    const stopTimesFile = zip.file("stop_times.txt");
-    if (!stopTimesFile) throw new Error("Missing stop_times.txt in GTFS zip");
-    const stopTimesBuffer = await stopTimesFile.async("arraybuffer");
-    if (generationAtStart !== bootGeneration) return;
 
     let workerLoaded = false;
     try {
@@ -3824,7 +3828,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
     addStopsToMap();
 
     setProgress(100, "Ready. Click a stop.");
-    setUpdatesUi({ showButton: false, showStatus: true, statusText: "GTFS Up To Date" });
+    setUpdatesUi({ showButton: false, showStatus: true, statusText: "GTFS Uploaded" });
     if (!workerLoaded && routeSummaryCache.size === 0) {
       setTimeout(() => {
         void preloadRouteSummariesInBackground(generationAtStart, stops.slice());
