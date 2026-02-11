@@ -84,7 +84,9 @@ const SIGN_VECTOR_NON_ROAD_LABEL_SIZE_SCALE = 1.48;
 const SIGN_VECTOR_GL_ZOOM_OFFSET = -1;
 const SIGN_BASEMAP_OPACITY = 0.86;
 const SIGN_ROUTE_LINE_WIDTH_RULES = [
+  { minGroupCount: 5, width: 17 },
   { minGroupCount: 4, width: 15 },
+  { minGroupCount: 3, width: 13 },
   { minGroupCount: 2, width: 10 },
   { minGroupCount: 0, width: 5 },
 ];
