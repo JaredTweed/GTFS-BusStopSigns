@@ -83,6 +83,11 @@ const SIGN_VECTOR_ROAD_LABEL_HALO_WIDTH = 1.2;
 const SIGN_VECTOR_NON_ROAD_LABEL_SIZE_SCALE = 1.48;
 const SIGN_VECTOR_GL_ZOOM_OFFSET = -1;
 const SIGN_BASEMAP_OPACITY = 0.86;
+const SIGN_ROUTE_LINE_WIDTH_RULES = [
+  { minGroupCount: 4, width: 15 },
+  { minGroupCount: 2, width: 10 },
+  { minGroupCount: 0, width: 5 },
+];
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
@@ -2190,6 +2195,17 @@ function buildNonSharedRuns(points, sharedEdgeKeySet) {
   return runs;
 }
 
+function groupedRouteLineWidthForCount(groupCount) {
+  const n = Number(groupCount) || 0;
+  for (const rule of SIGN_ROUTE_LINE_WIDTH_RULES) {
+    const min = Number(rule?.minGroupCount);
+    const width = Number(rule?.width);
+    if (!Number.isFinite(min) || !Number.isFinite(width)) continue;
+    if (n >= min) return width;
+  }
+  return 5;
+}
+
 function drawStripedLineOnCanvas(ctx, x1, y1, x2, y2, colors, width) {
   if (!colors || colors.length === 0) return;
   const dx = x2 - x1;
@@ -2770,7 +2786,7 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
       if (pixelPoints.length < 2) continue;
 
       ctx.strokeStyle = seg.lineColor;
-      ctx.lineWidth = 5;
+      ctx.lineWidth = groupedRouteLineWidthForCount(1);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.beginPath();
@@ -2788,7 +2804,8 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
       const [px, py] = project(lat, lon);
       return { x: px, y: py };
     });
-    drawStripedPolylineOnCanvas(ctx, pixelPoints, chain.colors, 5, { lineCap: "butt" });
+    const groupedWidth = groupedRouteLineWidthForCount(chain.colors?.length || 0);
+    drawStripedPolylineOnCanvas(ctx, pixelPoints, chain.colors, groupedWidth, { lineCap: "butt" });
   }
 
   if (stopLat != null && stopLon != null) {
@@ -3288,7 +3305,7 @@ async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputSca
         const [x, y] = project(lat, lon);
         return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
       }).join(" ");
-      routePathSvg.push(`<path d="${d}" fill="none" stroke="${seg.lineColor}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />`);
+      routePathSvg.push(`<path d="${d}" fill="none" stroke="${seg.lineColor}" stroke-width="${groupedRouteLineWidthForCount(1)}" stroke-linecap="round" stroke-linejoin="round" />`);
     }
   }
 
@@ -3300,7 +3317,8 @@ async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputSca
       const [x, y] = project(lat, lon);
       return { x, y };
     });
-    const laneStep = Math.max(2, 5 / chain.colors.length);
+    const groupedWidth = groupedRouteLineWidthForCount(chain.colors.length);
+    const laneStep = Math.max(2, groupedWidth / chain.colors.length);
     const laneWidth = Math.max(2, laneStep - 0.4);
 
     for (let i = 0; i < chain.colors.length; i += 1) {
