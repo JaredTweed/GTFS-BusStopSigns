@@ -90,6 +90,8 @@ const SIGN_ROUTE_LINE_WIDTH_RULES = [
   { minGroupCount: 2, width: 10 },
   { minGroupCount: 0, width: 5 },
 ];
+const SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX = 0.35;
+const SIGN_ROUTE_GROUP_LANE_OVERLAP_PX = 0.25;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
@@ -673,43 +675,52 @@ function offsetPolylinePixels(pixelPoints, offsetPx) {
     y: pts[0].y + (segs[0].ny * offsetPx),
   };
 
-  const maxMiter = Math.max(4, Math.abs(offsetPx) * 6);
+  const maxMiter = Math.max(4, Math.abs(offsetPx) * 5);
   for (let i = 1; i < pts.length - 1; i += 1) {
     const p = pts[i];
     const a = segs[i - 1];
     const b = segs[i];
 
-    const ax = p.x + (a.nx * offsetPx);
-    const ay = p.y + (a.ny * offsetPx);
-    const bx = p.x + (b.nx * offsetPx);
-    const by = p.y + (b.ny * offsetPx);
+    let bnx = a.nx + b.nx;
+    let bny = a.ny + b.ny;
+    let blen = Math.hypot(bnx, bny);
+    if (blen <= 1e-6) {
+      shifted[i] = {
+        x: p.x + (a.nx * offsetPx),
+        y: p.y + (a.ny * offsetPx),
+      };
+      continue;
+    }
+    const jnx = bnx / blen;
+    const jny = bny / blen;
 
-    const denom = (a.tx * b.ty) - (a.ty * b.tx);
-    let ix = null;
-    let iy = null;
-    if (Math.abs(denom) > 1e-6) {
-      const rx = bx - ax;
-      const ry = by - ay;
-      const t = ((rx * b.ty) - (ry * b.tx)) / denom;
-      ix = ax + (a.tx * t);
-      iy = ay + (a.ty * t);
-      if (Math.hypot(ix - p.x, iy - p.y) > maxMiter) {
-        ix = null;
-        iy = null;
-      }
+    const proj = (jnx * b.nx) + (jny * b.ny);
+    const fallback = () => ({
+      x: p.x + (((a.nx + b.nx) * 0.5) * offsetPx),
+      y: p.y + (((a.ny + b.ny) * 0.5) * offsetPx),
+    });
+
+    if (!Number.isFinite(proj) || Math.abs(proj) < 1e-3) {
+      shifted[i] = fallback();
+      continue;
     }
 
-    if (ix == null || iy == null) {
-      const bnx = a.nx + b.nx;
-      const bny = a.ny + b.ny;
-      const blen = Math.hypot(bnx, bny);
-      if (blen > 1e-6) {
-        ix = p.x + ((bnx / blen) * offsetPx);
-        iy = p.y + ((bny / blen) * offsetPx);
-      } else {
-        ix = p.x + (a.nx * offsetPx);
-        iy = p.y + (a.ny * offsetPx);
-      }
+    let miterLen = offsetPx / proj;
+    if (!Number.isFinite(miterLen) || Math.abs(miterLen) > maxMiter) {
+      shifted[i] = fallback();
+      continue;
+    }
+
+    const ix = p.x + (jnx * miterLen);
+    const iy = p.y + (jny * miterLen);
+    const sx = ix - p.x;
+    const sy = iy - p.y;
+    const wantSign = Math.sign(offsetPx) || 1;
+    const sideA = (sx * a.nx) + (sy * a.ny);
+    const sideB = (sx * b.nx) + (sy * b.ny);
+    if ((sideA * wantSign < -1e-6) || (sideB * wantSign < -1e-6)) {
+      shifted[i] = fallback();
+      continue;
     }
 
     shifted[i] = { x: ix, y: iy };
@@ -2208,6 +2219,74 @@ function groupedRouteLineWidthForCount(groupCount) {
   return 5;
 }
 
+function pointToSegmentDistanceSq(p, a, b) {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const apx = p.x - a.x;
+  const apy = p.y - a.y;
+  const denom = (abx * abx) + (aby * aby);
+  if (denom <= 1e-9) return (apx * apx) + (apy * apy);
+  const t = Math.max(0, Math.min(1, ((apx * abx) + (apy * aby)) / denom));
+  const qx = a.x + (abx * t);
+  const qy = a.y + (aby * t);
+  const dx = p.x - qx;
+  const dy = p.y - qy;
+  return (dx * dx) + (dy * dy);
+}
+
+function simplifyPixelPolyline(pixelPoints, tolerancePx = 0) {
+  if (!Array.isArray(pixelPoints) || pixelPoints.length < 3) {
+    return Array.isArray(pixelPoints) ? pixelPoints.slice() : [];
+  }
+  const tol = Number(tolerancePx);
+  if (!Number.isFinite(tol) || tol <= 0) return pixelPoints.slice();
+
+  const pts = pixelPoints;
+  const keep = new Array(pts.length).fill(false);
+  keep[0] = true;
+  keep[pts.length - 1] = true;
+  const tolSq = tol * tol;
+  const stack = [[0, pts.length - 1]];
+
+  while (stack.length) {
+    const [startIdx, endIdx] = stack.pop();
+    if (endIdx - startIdx <= 1) continue;
+
+    let maxDistSq = -1;
+    let maxIdx = -1;
+    for (let i = startIdx + 1; i < endIdx; i += 1) {
+      const dSq = pointToSegmentDistanceSq(pts[i], pts[startIdx], pts[endIdx]);
+      if (dSq > maxDistSq) {
+        maxDistSq = dSq;
+        maxIdx = i;
+      }
+    }
+
+    if (maxDistSq > tolSq && maxIdx > startIdx && maxIdx < endIdx) {
+      keep[maxIdx] = true;
+      stack.push([startIdx, maxIdx], [maxIdx, endIdx]);
+    }
+  }
+
+  const out = [];
+  for (let i = 0; i < pts.length; i += 1) {
+    if (keep[i]) out.push(pts[i]);
+  }
+  return out.length >= 2 ? out : [pts[0], pts[pts.length - 1]];
+}
+
+function compactPixelPolyline(pixelPoints, minDistPx = 0.25) {
+  if (!Array.isArray(pixelPoints) || pixelPoints.length < 2) return Array.isArray(pixelPoints) ? pixelPoints.slice() : [];
+  const out = [pixelPoints[0]];
+  for (let i = 1; i < pixelPoints.length; i += 1) {
+    const p = pixelPoints[i];
+    const q = out[out.length - 1];
+    if (Math.hypot(p.x - q.x, p.y - q.y) >= minDistPx) out.push(p);
+  }
+  if (out.length < 2) return [pixelPoints[0], pixelPoints[pixelPoints.length - 1]];
+  return out;
+}
+
 function drawStripedLineOnCanvas(ctx, x1, y1, x2, y2, colors, width) {
   if (!colors || colors.length === 0) return;
   const dx = x2 - x1;
@@ -2273,14 +2352,18 @@ function drawStripedLineOnMap(layer, mapObj, a, b, colors, width) {
 function drawStripedPolylineOnCanvas(ctx, pixelPoints, colors, width, options = {}) {
   if (!Array.isArray(pixelPoints) || pixelPoints.length < 2 || !colors || colors.length === 0) return;
   const lineCap = options.lineCap || "round";
+  let centerPoints = compactPixelPolyline(pixelPoints);
+  const simplifyTolerancePx = Number.isFinite(options.simplifyTolerancePx) ? Math.max(0, options.simplifyTolerancePx) : 0;
+  if (simplifyTolerancePx > 0) centerPoints = simplifyPixelPolyline(centerPoints, simplifyTolerancePx);
+  if (centerPoints.length < 2) return;
   if (colors.length === 1) {
     ctx.strokeStyle = colors[0];
     ctx.lineWidth = width;
     ctx.lineCap = lineCap;
     ctx.lineJoin = "round";
     ctx.beginPath();
-    for (let i = 0; i < pixelPoints.length; i += 1) {
-      const p = pixelPoints[i];
+    for (let i = 0; i < centerPoints.length; i += 1) {
+      const p = centerPoints[i];
       if (i === 0) ctx.moveTo(p.x, p.y);
       else ctx.lineTo(p.x, p.y);
     }
@@ -2289,10 +2372,12 @@ function drawStripedPolylineOnCanvas(ctx, pixelPoints, colors, width, options = 
   }
 
   const laneStep = Math.max(2, width / colors.length);
-  const laneWidth = Math.max(2, laneStep - 0.4);
+  const laneOverlapPx = Number.isFinite(options.laneOverlapPx) ? options.laneOverlapPx : 0;
+  const laneWidth = Math.max(2, laneStep + laneOverlapPx);
   for (let i = 0; i < colors.length; i += 1) {
     const off = ((i - ((colors.length - 1) / 2)) * laneStep);
-    const shifted = offsetPolylinePixels(pixelPoints, off);
+    let shifted = offsetPolylinePixels(centerPoints, off);
+    shifted = compactPixelPolyline(shifted);
     if (shifted.length < 2) continue;
 
     ctx.strokeStyle = colors[i];
@@ -2807,7 +2892,11 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
       return { x: px, y: py };
     });
     const groupedWidth = groupedRouteLineWidthForCount(chain.colors?.length || 0);
-    drawStripedPolylineOnCanvas(ctx, pixelPoints, chain.colors, groupedWidth, { lineCap: "butt" });
+    drawStripedPolylineOnCanvas(ctx, pixelPoints, chain.colors, groupedWidth, {
+      lineCap: "butt",
+      simplifyTolerancePx: SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX,
+      laneOverlapPx: SIGN_ROUTE_GROUP_LANE_OVERLAP_PX,
+    });
   }
 
   if (stopLat != null && stopLon != null) {
@@ -3315,17 +3404,23 @@ async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputSca
   for (const chain of sharedChains) {
     if (!chain.colors || chain.colors.length <= 1 || chain.points.length < 2) continue;
 
-    const pixelPoints = chain.points.map(([lat, lon]) => {
+    const pixelPointsRaw = chain.points.map(([lat, lon]) => {
       const [x, y] = project(lat, lon);
       return { x, y };
     });
+    let pixelPoints = compactPixelPolyline(pixelPointsRaw);
+    if (SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX > 0) {
+      pixelPoints = simplifyPixelPolyline(pixelPoints, SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX);
+    }
+    if (pixelPoints.length < 2) continue;
     const groupedWidth = groupedRouteLineWidthForCount(chain.colors.length);
     const laneStep = Math.max(2, groupedWidth / chain.colors.length);
-    const laneWidth = Math.max(2, laneStep - 0.4);
+    const laneWidth = Math.max(2, laneStep + SIGN_ROUTE_GROUP_LANE_OVERLAP_PX);
 
     for (let i = 0; i < chain.colors.length; i += 1) {
       const off = ((i - ((chain.colors.length - 1) / 2)) * laneStep);
-      const shifted = offsetPolylinePixels(pixelPoints, off);
+      let shifted = offsetPolylinePixels(pixelPoints, off);
+      shifted = compactPixelPolyline(shifted);
       if (shifted.length < 2) continue;
       const d = shifted.map((p, idx) => `${idx === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
       sharedLaneSvg.push(`<path d="${d}" fill="none" stroke="${chain.colors[i]}" stroke-width="${laneWidth.toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round" />`);
