@@ -90,8 +90,8 @@ const SIGN_ROUTE_LINE_WIDTH_RULES = [
   { minGroupCount: 2, width: 10 },
   { minGroupCount: 0, width: 5 },
 ];
-const SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX = 0.35;
-const SIGN_ROUTE_GROUP_LANE_OVERLAP_PX = 0.25;
+const SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX = 0;
+const SIGN_ROUTE_GROUP_LANE_OVERLAP_PX = 0.45;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
@@ -2135,6 +2135,44 @@ function buildSharedLaneChains(sharedEdges) {
       if (indeg !== 1 || outdeg !== 1) startNodes.push(nk);
     }
 
+    const edgeDirectionUnit = (edge) => {
+      const a = edge.drawA || edge.a;
+      const b = edge.drawB || edge.b;
+      const dx = b[1] - a[1];
+      const dy = b[0] - a[0];
+      const len = Math.hypot(dx, dy) || 1;
+      return { dx: dx / len, dy: dy / len, len };
+    };
+
+    const chooseBestNextEdge = (currEdgeIdx, candidateIdxs) => {
+      if (!candidateIdxs.length) return null;
+      if (candidateIdxs.length === 1) return candidateIdxs[0];
+
+      const currDir = edgeDirectionUnit(items[currEdgeIdx].edge);
+      let bestIdx = null;
+      let bestScore = -Infinity;
+      let bestLen = -Infinity;
+
+      for (const idx of candidateIdxs) {
+        const candDir = edgeDirectionUnit(items[idx].edge);
+        const score = (currDir.dx * candDir.dx) + (currDir.dy * candDir.dy);
+        if (
+          score > bestScore
+          || (score === bestScore && candDir.len > bestLen)
+        ) {
+          bestScore = score;
+          bestLen = candDir.len;
+          bestIdx = idx;
+        }
+      }
+
+      if (bestIdx == null) return null;
+      // Avoid hard U-turn continuations; in those cases end this chain and let
+      // the remaining edge(s) start their own chain.
+      if (bestScore < -0.2) return null;
+      return bestIdx;
+    };
+
     const walkFromEdge = (startEdgeIdx) => {
       if (visited.has(startEdgeIdx)) return;
 
@@ -2157,8 +2195,13 @@ function buildSharedLaneChains(sharedEdges) {
         const indeg = inCount.get(bk) || 0;
         const outdeg = outCount.get(bk) || 0;
 
-        if (outs.length === 1 && indeg === 1 && outdeg === 1) currIdx = outs[0];
-        else currIdx = null;
+        if (outs.length === 0) {
+          currIdx = null;
+        } else if (outs.length === 1 && indeg === 1 && outdeg === 1) {
+          currIdx = outs[0];
+        } else {
+          currIdx = chooseBestNextEdge(currIdx, outs);
+        }
       }
 
       if (points.length >= 2) {
@@ -2275,7 +2318,7 @@ function simplifyPixelPolyline(pixelPoints, tolerancePx = 0) {
   return out.length >= 2 ? out : [pts[0], pts[pts.length - 1]];
 }
 
-function compactPixelPolyline(pixelPoints, minDistPx = 0.25) {
+function compactPixelPolyline(pixelPoints, minDistPx = 0.05) {
   if (!Array.isArray(pixelPoints) || pixelPoints.length < 2) return Array.isArray(pixelPoints) ? pixelPoints.slice() : [];
   const out = [pixelPoints[0]];
   for (let i = 1; i < pixelPoints.length; i += 1) {
@@ -2377,7 +2420,6 @@ function drawStripedPolylineOnCanvas(ctx, pixelPoints, colors, width, options = 
   for (let i = 0; i < colors.length; i += 1) {
     const off = ((i - ((colors.length - 1) / 2)) * laneStep);
     let shifted = offsetPolylinePixels(centerPoints, off);
-    shifted = compactPixelPolyline(shifted);
     if (shifted.length < 2) continue;
 
     ctx.strokeStyle = colors[i];
@@ -3420,7 +3462,6 @@ async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputSca
     for (let i = 0; i < chain.colors.length; i += 1) {
       const off = ((i - ((chain.colors.length - 1) / 2)) * laneStep);
       let shifted = offsetPolylinePixels(pixelPoints, off);
-      shifted = compactPixelPolyline(shifted);
       if (shifted.length < 2) continue;
       const d = shifted.map((p, idx) => `${idx === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
       sharedLaneSvg.push(`<path d="${d}" fill="none" stroke="${chain.colors[i]}" stroke-width="${laneWidth.toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round" />`);
