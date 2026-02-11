@@ -23,6 +23,7 @@ const ui = {
   progressBar: el("progressBar"),
   progressText: el("progressText"),
   reloadBtn: el("reloadBtn"),
+  updatesStatus: el("updatesStatus"),
   gtfsFile: el("gtfsFile"),
   modal: el("modal"),
   modalBackdrop: el("modalBackdrop"),
@@ -58,6 +59,8 @@ const tileImageCache = new Map();
 let routeSummaryCache = new Map(); // `${stop_id}::${direction}` -> summary array
 let bootGeneration = 0;
 let feedUpdatedDateLabel = "";
+let feedUpdatedDateKey = null;
+let usingPreloadedSummaries = false;
 
 const MAP_LINE_PALETTE = [
   "#e63946", "#1d3557", "#2a9d8f", "#f4a261", "#6a4c93",
@@ -83,6 +86,7 @@ const SIGN_BASEMAP_OPACITY = 0.86;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
+const TRANSLINK_LATEST_GTFS_URL = "https://gtfs-static.translink.ca/gtfs/google_transit.zip";
 const FIXED_DIRECTION_FILTER = "all";
 const FIXED_EXPORT_SCALE = 3;
 const PREVIEW_ZOOM_MIN = 1;
@@ -173,6 +177,16 @@ function parseGtfsDateKey(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function dateKeyToIsoDate(dateKey) {
+  if (!Number.isFinite(dateKey)) return "";
+  const raw = String(Math.trunc(dateKey)).padStart(8, "0");
+  const y = raw.slice(0, 4);
+  const m = raw.slice(4, 6);
+  const d = raw.slice(6, 8);
+  if (!/^\d{4}$/.test(y) || !/^\d{2}$/.test(m) || !/^\d{2}$/.test(d)) return "";
+  return `${y}-${m}-${d}`;
+}
+
 function formatDateKeyForDisplay(dateKey) {
   if (!Number.isFinite(dateKey)) return "";
   const raw = String(Math.trunc(dateKey)).padStart(8, "0");
@@ -205,25 +219,27 @@ function extractDateKeysFromText(text) {
   return out;
 }
 
-function deriveFeedUpdatedDateLabel(feedInfoRows) {
-  if (!Array.isArray(feedInfoRows) || feedInfoRows.length === 0) return "";
-  const row = feedInfoRows[0] || {};
-
+function feedDateCandidatesFromInfoRow(row) {
   const candidates = [];
-  const versionKeys = extractDateKeysFromText(row.feed_version);
+  const versionKeys = extractDateKeysFromText(row?.feed_version);
   for (const key of versionKeys) candidates.push(key);
 
   if (candidates.length === 0) {
-    const start = parseGtfsDateKey(row.feed_start_date);
+    const start = parseGtfsDateKey(row?.feed_start_date);
     if (start != null) candidates.push(start);
   }
   if (candidates.length === 0) {
-    const end = parseGtfsDateKey(row.feed_end_date);
+    const end = parseGtfsDateKey(row?.feed_end_date);
     if (end != null) candidates.push(end);
   }
-  if (candidates.length === 0) return "";
-
   candidates.sort((a, b) => b - a);
+  return candidates;
+}
+
+function deriveFeedUpdatedDateLabel(feedInfoRows) {
+  if (!Array.isArray(feedInfoRows) || feedInfoRows.length === 0) return "";
+  const row = feedInfoRows[0] || {};
+  const candidates = feedDateCandidatesFromInfoRow(row);
   for (const key of candidates) {
     const label = formatDateKeyForDisplay(key);
     if (label) return label;
@@ -231,10 +247,29 @@ function deriveFeedUpdatedDateLabel(feedInfoRows) {
   return "";
 }
 
+function deriveFeedUpdatedDateKey(feedInfoRows) {
+  if (!Array.isArray(feedInfoRows) || feedInfoRows.length === 0) return null;
+  const row = feedInfoRows[0] || {};
+  const candidates = feedDateCandidatesFromInfoRow(row);
+  return candidates.length ? candidates[0] : null;
+}
+
 function signFooterText() {
   const base = "Generated from GTFS • Created by Jared Tweed";
   if (!feedUpdatedDateLabel) return base;
   return `${base} • Updated ${feedUpdatedDateLabel}`;
+}
+
+function setUpdatesUi({ showButton = false, showStatus = false, statusText = "GTFS Up To Date", buttonText = "Download Updated GTFS File", disableButton = false } = {}) {
+  if (ui.reloadBtn) {
+    ui.reloadBtn.style.display = showButton ? "" : "none";
+    ui.reloadBtn.textContent = buttonText;
+    ui.reloadBtn.disabled = !!disableButton;
+  }
+  if (ui.updatesStatus) {
+    ui.updatesStatus.style.display = showStatus ? "" : "none";
+    ui.updatesStatus.textContent = statusText;
+  }
 }
 
 function getLast7DatesInfo() {
@@ -3526,7 +3561,16 @@ ui.copyBtn.addEventListener("click", async () => {
 });
 
 ui.reloadBtn.addEventListener("click", async () => {
-  await boot({ zipUrl: DEFAULT_ZIP_URL, zipName: "google_transit.zip" });
+  if (!usingPreloadedSummaries) return;
+
+  setUpdatesUi({
+    showButton: false,
+    showStatus: true,
+    statusText: "GTFS Downloaded (upload to apply)",
+    buttonText: "Download Updated GTFS File",
+    disableButton: false,
+  });
+  window.open(TRANSLINK_LATEST_GTFS_URL, "_blank", "noopener,noreferrer");
 });
 
 ui.gtfsFile.addEventListener("change", async (e) => {
@@ -3552,10 +3596,13 @@ async function boot({ zipUrl, zipFile, zipName }) {
   lastWeekWeekdayByDateKey = new Map();
   hasServiceCalendarData = false;
   feedUpdatedDateLabel = "";
+  feedUpdatedDateKey = null;
   signVectorUnavailable = false;
+  usingPreloadedSummaries = false;
   selectedStop = null;
   selectedStopRouteSummary = null;
   routeSummaryCache = new Map();
+  setUpdatesUi({ showButton: false, showStatus: false });
 
   try {
     const zip = zipFile ? await loadZipFromFile(zipFile) : await loadZipFromUrl(zipUrl);
@@ -3572,6 +3619,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
       try {
         const feedInfoRows = await parseCSVFromZip(zip, "feed_info.txt");
         feedUpdatedDateLabel = deriveFeedUpdatedDateLabel(feedInfoRows);
+        feedUpdatedDateKey = deriveFeedUpdatedDateKey(feedInfoRows);
       } catch (err) {
         console.warn("Failed to parse feed_info.txt for update date.", err);
       }
@@ -3634,6 +3682,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
     const preloadedLoaded = await preloadPromise;
     if (generationAtStart !== bootGeneration) return;
     if (preloadedLoaded) {
+      usingPreloadedSummaries = true;
       setProgress(45, "Finishing shapes…");
       await shapesPromise;
       if (generationAtStart !== bootGeneration) return;
@@ -3643,6 +3692,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
       setProgress(98, "Rendering stops on map…");
       addStopsToMap();
       setProgress(100, "Ready. Click a stop.");
+      setUpdatesUi({ showButton: true, showStatus: false, buttonText: "Download Updated GTFS File", disableButton: false });
       console.log("Loaded with precomputed route summaries.");
       return;
     }
@@ -3745,6 +3795,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
     addStopsToMap();
 
     setProgress(100, "Ready. Click a stop.");
+    setUpdatesUi({ showButton: false, showStatus: true, statusText: "GTFS Up To Date" });
     if (!workerLoaded && routeSummaryCache.size === 0) {
       setTimeout(() => {
         void preloadRouteSummariesInBackground(generationAtStart, stops.slice());

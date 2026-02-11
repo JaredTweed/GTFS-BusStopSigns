@@ -34,9 +34,10 @@
     </div>
 
     <div class="topbar__right">
-      <button id="reloadBtn" class="btn btn--ghost" title="Reload data">Reload</button>
+      <button id="reloadBtn" class="btn btn--ghost" title="Download latest GTFS data" style="display:none;">Download Updated GTFS File</button>
+      <span id="updatesStatus" class="muted small" style="display:none;">GTFS Up To Date</span>
       <label class="btn btn--ghost fileBtn" title="Load a different GTFS zip">
-        Load GTFS ZIP…
+        Upload GTFS ZIP
         <input id="gtfsFile" type="file" accept=".zip" />
       </label>
     </div>
