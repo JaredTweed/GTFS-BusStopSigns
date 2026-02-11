@@ -304,28 +304,6 @@ function buildGroupedActiveHoursText(timesByGroup, fallbackTimes = []) {
   return fallback ? `All days (${fallback})` : "";
 }
 
-function splitTextByMaxChars(text, maxChars) {
-  const src = String(text || "").trim();
-  if (!src) return [];
-  const words = src.split(/\s+/);
-  const out = [];
-  let line = "";
-  for (const w of words) {
-    if (!line) {
-      line = w;
-      continue;
-    }
-    if ((line.length + 1 + w.length) <= maxChars) {
-      line += ` ${w}`;
-    } else {
-      out.push(line);
-      line = w;
-    }
-  }
-  if (line) out.push(line);
-  return out;
-}
-
 function buildLegendLinesForSegment(seg, maxChars = 116) {
   const route = (seg?.display_name || seg?.route_short_name || "Route").toString().trim();
   const active = (seg?.active_hours_text || "").toString().trim();
@@ -443,16 +421,6 @@ function normalizeColor(hex, fallback="#333333") {
   if (/^[0-9a-fA-F]{6}$/.test(v)) return `#${v}`;
   if (/^[0-9a-fA-F]{3}$/.test(v)) return `#${v}`;
   return fallback;
-}
-
-function pickTextColor(bgHex) {
-  // Simple luminance-based selection
-  const hex = bgHex.replace("#", "");
-  const r = parseInt(hex.slice(0,2), 16) / 255;
-  const g = parseInt(hex.slice(2,4), 16) / 255;
-  const b = parseInt(hex.slice(4,6), 16) / 255;
-  const lum = 0.2126*r + 0.7152*g + 0.0722*b;
-  return lum < 0.55 ? "#ffffff" : "#111111";
 }
 
 function distance2(latA, lonA, latB, lonB) {
