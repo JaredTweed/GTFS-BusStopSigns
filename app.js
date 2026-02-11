@@ -187,6 +187,13 @@ function dateKeyToIsoDate(dateKey) {
   return `${y}-${m}-${d}`;
 }
 
+function parseDateKeyFromHistoryGtfsUrl(url) {
+  const raw = String(url || "");
+  const m = raw.match(/\/History\/(\d{4})-(\d{2})-(\d{2})\/google_transit\.zip(?:$|[?#])/i);
+  if (!m) return null;
+  return parseGtfsDateKey(`${m[1]}${m[2]}${m[3]}`);
+}
+
 function formatDateKeyForDisplay(dateKey) {
   if (!Number.isFinite(dateKey)) return "";
   const raw = String(Math.trunc(dateKey)).padStart(8, "0");
@@ -258,6 +265,13 @@ function signFooterText() {
   const base = "Generated from GTFS • Created by Jared Tweed";
   if (!feedUpdatedDateLabel) return base;
   return `${base} • Updated ${feedUpdatedDateLabel}`;
+}
+
+function isCurrentFeedUpToDateWithDownloadLink() {
+  if (!Number.isFinite(feedUpdatedDateKey)) return false;
+  const linkDateKey = parseDateKeyFromHistoryGtfsUrl(TRANSLINK_LATEST_GTFS_URL);
+  if (!Number.isFinite(linkDateKey)) return false;
+  return feedUpdatedDateKey === linkDateKey;
 }
 
 function setUpdatesUi({ showButton = false, showStatus = false, statusText = "GTFS Up To Date", buttonText = "Download Updated GTFS File", disableButton = false } = {}) {
@@ -3562,6 +3576,17 @@ ui.copyBtn.addEventListener("click", async () => {
 
 ui.reloadBtn.addEventListener("click", async () => {
   if (!usingPreloadedSummaries) return;
+  const feedDateIso = dateKeyToIsoDate(feedUpdatedDateKey);
+  const linkDateKey = parseDateKeyFromHistoryGtfsUrl(TRANSLINK_LATEST_GTFS_URL);
+  const linkDateIso = dateKeyToIsoDate(linkDateKey);
+  console.log("GTFS update date check", {
+    feed_date_key: feedUpdatedDateKey,
+    feed_date_iso: feedDateIso || null,
+    download_url: TRANSLINK_LATEST_GTFS_URL,
+    download_date_key: linkDateKey,
+    download_date_iso: linkDateIso || null,
+    dates_match: Number.isFinite(feedUpdatedDateKey) && Number.isFinite(linkDateKey) && feedUpdatedDateKey === linkDateKey,
+  });
 
   setUpdatesUi({
     showButton: false,
@@ -3692,7 +3717,11 @@ async function boot({ zipUrl, zipFile, zipName }) {
       setProgress(98, "Rendering stops on map…");
       addStopsToMap();
       setProgress(100, "Ready. Click a stop.");
-      setUpdatesUi({ showButton: true, showStatus: false, buttonText: "Download Updated GTFS File", disableButton: false });
+      if (isCurrentFeedUpToDateWithDownloadLink()) {
+        setUpdatesUi({ showButton: false, showStatus: true, statusText: "GTFS Up To Date" });
+      } else {
+        setUpdatesUi({ showButton: true, showStatus: false, buttonText: "Download Updated GTFS File", disableButton: false });
+      }
       console.log("Loaded with precomputed route summaries.");
       return;
     }
