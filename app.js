@@ -68,7 +68,7 @@ const MAP_TILE_LABELS_URL = "https://{s}.basemaps.cartocdn.com/rastertiles/voyag
 const MAP_TILE_SUBDOMAINS = "abcd";
 const MAP_TILE_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO";
 const SIGN_MAP_ZOOM_IN_STEPS = 1;
-const SIGN_MAP_ZOOM_FIT_STEP = 0.5;
+const SIGN_MAP_ZOOM_FIT_STEP = 0.2;
 const SIGN_BASEMAP_TILE_ZOOM_OFFSET = 1;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
@@ -2293,7 +2293,7 @@ function getRouteBounds(stop, segments) {
 }
 
 function chooseMapZoom(bounds, width, height) {
-  const pad = 1.2;
+  const pad = 1.02;
   const fitsAtZoom = (z) => {
     const a = latLonToWorld(bounds.minLat, bounds.minLon, z);
     const b = latLonToWorld(bounds.maxLat, bounds.maxLon, z);
