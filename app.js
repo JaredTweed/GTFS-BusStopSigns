@@ -567,6 +567,39 @@ function distance2(latA, lonA, latB, lonB) {
   return dLat * dLat + dLon * dLon;
 }
 
+function projectPointToSegment(lat, lon, aLat, aLon, bLat, bLon) {
+  const abLat = bLat - aLat;
+  const abLon = bLon - aLon;
+  const denom = (abLat * abLat) + (abLon * abLon);
+  if (denom <= 1e-12) {
+    return { t: 0, lat: aLat, lon: aLon, d2: distance2(lat, lon, aLat, aLon) };
+  }
+  const apLat = lat - aLat;
+  const apLon = lon - aLon;
+  let t = ((apLat * abLat) + (apLon * abLon)) / denom;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  const pLat = aLat + (abLat * t);
+  const pLon = aLon + (abLon * t);
+  return { t, lat: pLat, lon: pLon, d2: distance2(lat, lon, pLat, pLon) };
+}
+
+function findClosestProjectionOnShape(shape, stopLat, stopLon) {
+  if (!Array.isArray(shape) || shape.length < 2) return null;
+  if (!Number.isFinite(stopLat) || !Number.isFinite(stopLon)) return null;
+
+  let best = null;
+  for (let i = 0; i < shape.length - 1; i += 1) {
+    const [aLat, aLon] = shape[i];
+    const [bLat, bLon] = shape[i + 1];
+    const proj = projectPointToSegment(stopLat, stopLon, aLat, aLon, bLat, bLon);
+    if (!best || proj.d2 < best.d2) {
+      best = { ...proj, segIdx: i };
+    }
+  }
+  return best;
+}
+
 function colorForIndex(idx) {
   if (idx < MAP_LINE_PALETTE.length) return MAP_LINE_PALETTE[idx];
   const hue = (idx * 47) % 360;
@@ -593,21 +626,22 @@ function buildRouteSegmentsForStop(stop, items, maxRoutes) {
     if (!shape || shape.length < 2) continue;
     usedRouteShapes.add(routeShapeKey);
 
-    let startIdx = 0;
+    let clipped = shape.slice();
     if (stopLat != null && stopLon != null) {
-      let best = Infinity;
-      for (let i = 0; i < shape.length; i += 1) {
-        const [lat, lon] = shape[i];
-        const d2 = distance2(lat, lon, stopLat, stopLon);
-        if (d2 < best) {
-          best = d2;
-          startIdx = i;
+      const proj = findClosestProjectionOnShape(shape, stopLat, stopLon);
+      if (proj) {
+        const eps = 1e-6;
+        const segIdx = Math.max(0, Math.min(shape.length - 2, proj.segIdx));
+        if (proj.t <= eps) {
+          clipped = shape.slice(segIdx);
+        } else if (proj.t >= (1 - eps)) {
+          clipped = shape.slice(segIdx + 1);
+        } else {
+          clipped = [[proj.lat, proj.lon], ...shape.slice(segIdx + 1)];
         }
       }
     }
-
-    if (startIdx >= shape.length - 1) startIdx = Math.max(0, shape.length - 2);
-    const clipped = shape.slice(startIdx);
+    if (clipped.length < 2) clipped = shape.slice(Math.max(0, shape.length - 2));
     if (clipped.length < 2) continue;
 
     const short = (it.route_short_name || "").toString().trim();
