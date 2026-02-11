@@ -1060,11 +1060,11 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     });
   }
 
-  function applyEventToOrder(order, event) {
-    const idx = order.indexOf(event.rid);
+  function bubbleRouteToSide(order, rid, side) {
+    const idx = order.indexOf(rid);
     if (idx < 0) return;
 
-    if (event.side === "L") {
+    if (side === "L") {
       for (let i = idx; i > 0; i -= 1) {
         const t = order[i - 1];
         order[i - 1] = order[i];
@@ -1078,6 +1078,10 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       order[i + 1] = order[i];
       order[i] = t;
     }
+  }
+
+  function applyEventToOrder(order, event) {
+    bubbleRouteToSide(order, event.rid, event.side);
   }
 
   function preferredTransitionForBoundary(comp, nei) {
@@ -1349,9 +1353,26 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     const path = buildTracePath();
     if (!path.length) return;
 
+    const TERMINAL_EPS = 1e-12;
+    const TURN_SAMPLE_LOOKAHEAD_SHORT = 0.00025;
+    const TURN_SAMPLE_LOOKAHEAD_LONG = 0.0008;
+
     const firstOrder = path[0].order.slice();
     const traceEventsByRoute = [];
     const stepEvents = [];
+
+    function emitRouteBoundaryEvents({ sourceOrder, otherRouteIds, op, outEvents, outStep }) {
+      const movedRoutes = sourceOrder.filter((rid) => !otherRouteIds.includes(rid));
+      movedRoutes
+        .map((rid) => ({ rid, idx: sourceOrder.indexOf(rid) }))
+        .sort((a, b) => a.idx - b.idx)
+        .forEach(({ rid, idx }) => {
+          const side = sideForIndex(idx, sourceOrder.length);
+          const ev = { id: rid, op, side };
+          outEvents.push(ev);
+          outStep.push(ev);
+        });
+    }
 
     for (let i = 1; i < path.length; i += 1) {
       const prev = path[i - 1];
@@ -1360,27 +1381,20 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       const nextOrder = next.order.slice();
       const perStep = [];
 
-      const splitRoutes = prevOrder.filter((rid) => !next.routeIds.includes(rid));
-      splitRoutes
-        .map((rid) => ({ rid, idx: prevOrder.indexOf(rid) }))
-        .sort((a, b) => a.idx - b.idx)
-        .forEach(({ rid, idx }) => {
-          const side = sideForIndex(idx, prevOrder.length);
-          const ev = { id: rid, op: "S", side };
-          traceEventsByRoute.push(ev);
-          perStep.push(ev);
-        });
-
-      const mergeRoutes = nextOrder.filter((rid) => !prev.routeIds.includes(rid));
-      mergeRoutes
-        .map((rid) => ({ rid, idx: nextOrder.indexOf(rid) }))
-        .sort((a, b) => a.idx - b.idx)
-        .forEach(({ rid, idx }) => {
-          const side = sideForIndex(idx, nextOrder.length);
-          const ev = { id: rid, op: "M", side };
-          traceEventsByRoute.push(ev);
-          perStep.push(ev);
-        });
+      emitRouteBoundaryEvents({
+        sourceOrder: prevOrder,
+        otherRouteIds: next.routeIds,
+        op: "S",
+        outEvents: traceEventsByRoute,
+        outStep: perStep,
+      });
+      emitRouteBoundaryEvents({
+        sourceOrder: nextOrder,
+        otherRouteIds: prev.routeIds,
+        op: "M",
+        outEvents: traceEventsByRoute,
+        outStep: perStep,
+      });
       stepEvents.push(perStep);
     }
 
@@ -1496,7 +1510,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
             acc += planarDistDeg(prevPt, p);
             samplePoint = p;
             prevPt = p;
-            if (acc >= 0.00025) break;
+            if (acc >= TURN_SAMPLE_LOOKAHEAD_SHORT) break;
           }
         }
         if (!samplePoint) continue;
@@ -1520,7 +1534,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
 
     function terminalTwoRouteEdgeGeometry(comp, routeIds) {
       if (!Array.isArray(routeIds) || routeIds.length !== 2) return null;
-      const lookahead = 0.0008; // ~90m in lat-deg terms
+      const lookahead = TURN_SAMPLE_LOOKAHEAD_LONG; // ~90m in lat-deg terms
       const routeMeta = [];
 
       for (const rid of routeIds) {
@@ -1594,14 +1608,13 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       if (!Number.isFinite(sa) || !Number.isFinite(sb)) return null;
 
       const sideByRid = new Map();
-      const eps = 1e-12;
-      if (Math.abs(sa - sb) > eps) {
+      if (Math.abs(sa - sb) > TERMINAL_EPS) {
         sideByRid.set(a, sa > sb ? "L" : "R");
         sideByRid.set(b, sa > sb ? "R" : "L");
       } else {
         const ta = turnByRid.get(a);
         const tb = turnByRid.get(b);
-        if (Number.isFinite(ta) && Number.isFinite(tb) && Math.abs(ta - tb) > eps) {
+        if (Number.isFinite(ta) && Number.isFinite(tb) && Math.abs(ta - tb) > TERMINAL_EPS) {
           sideByRid.set(a, ta > tb ? "L" : "R");
           sideByRid.set(b, ta > tb ? "R" : "L");
         } else {
@@ -1642,10 +1655,10 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         const b = turnData.get(rightRid);
         const hasScore = Number.isFinite(a?.score) && Number.isFinite(b?.score);
         const hasTurn = Number.isFinite(a?.turn) && Number.isFinite(b?.turn);
-        if (hasScore && Math.abs(a.score - b.score) > 1e-12) {
+        if (hasScore && Math.abs(a.score - b.score) > TERMINAL_EPS) {
           sideByRid.set(leftRid, a.score > b.score ? "L" : "R");
           sideByRid.set(rightRid, a.score > b.score ? "R" : "L");
-        } else if (hasTurn && Math.abs(a.turn - b.turn) > 1e-12) {
+        } else if (hasTurn && Math.abs(a.turn - b.turn) > TERMINAL_EPS) {
           sideByRid.set(leftRid, a.turn > b.turn ? "L" : "R");
           sideByRid.set(rightRid, a.turn > b.turn ? "R" : "L");
         }
@@ -1784,24 +1797,6 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       }
     }
 
-    function applyBubble(order, id, side) {
-      const idx = order.indexOf(id);
-      if (idx < 0) return;
-      if (side === "L") {
-        for (let i = idx; i > 0; i -= 1) {
-          const t = order[i - 1];
-          order[i - 1] = order[i];
-          order[i] = t;
-        }
-        return;
-      }
-      for (let i = idx; i < order.length - 1; i += 1) {
-        const t = order[i + 1];
-        order[i + 1] = order[i];
-        order[i] = t;
-      }
-    }
-
     function permutations(arr) {
       if (arr.length <= 1) return [arr.slice()];
       const out = [];
@@ -1822,7 +1817,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
         if (idx < 0) continue;
         const target = ev.side === "L" ? 0 : (sim.length - 1);
         cost += Math.abs(target - idx);
-        applyBubble(sim, ev.id, ev.side);
+        bubbleRouteToSide(sim, ev.id, ev.side);
       }
       return cost;
     }
@@ -1864,7 +1859,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     // trace output so rendered lane ordering matches the console order.
     const replayOrder = masterRouteOrder.slice();
     for (let i = 1; i < path.length; i += 1) {
-      for (const ev of (stepEvents[i - 1] || [])) applyBubble(replayOrder, ev.id, ev.side);
+      for (const ev of (stepEvents[i - 1] || [])) bubbleRouteToSide(replayOrder, ev.id, ev.side);
       const projected = replayOrder.filter((rid) => path[i].routeIds.includes(rid));
       if (projected.length) path[i].order = projected;
     }
@@ -1903,7 +1898,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     }
 
     for (const ev of traceEventsByRoute) {
-      applyBubble(masterRouteOrder, ev.id, ev.side);
+      bubbleRouteToSide(masterRouteOrder, ev.id, ev.side);
       if (ev.op === "S") splitSideById.set(ev.id, ev.side);
       else if (ev.op === "M") splitSideById.delete(ev.id);
 
