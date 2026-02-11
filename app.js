@@ -1350,7 +1350,6 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     if (!path.length) return;
 
     const firstOrder = path[0].order.slice();
-    const firstLineOrder = firstOrder.map((rid) => lineIdForRoute(rid));
     const traceEventsByRoute = [];
     const stepEvents = [];
 
@@ -1410,96 +1409,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       return obs.side > 0 ? "L" : "R";
     }
 
-    function terminalSplitSideByRank(comp, routeIds) {
-      function chooseBestTerminalSplitNode(routeIdsForNode) {
-        const nodeStats = new Map();
-        for (const rid of routeIdsForNode) {
-          const seenNodesForRoute = new Set();
-          for (const nodeKey of comp.nodeCoords.keys()) {
-            const contexts = collectRouteNodeContexts(comp, rid, nodeKey);
-            if (!contexts.length) continue;
-            const splitNodeIdx = contexts
-              .filter((ctx) => ctx.prevInComp && !ctx.nextInComp)
-              .reduce((m, ctx) => Math.max(m, ctx.idx), -Infinity);
-            if (!Number.isFinite(splitNodeIdx)) continue;
-            if (seenNodesForRoute.has(nodeKey)) continue;
-            seenNodesForRoute.add(nodeKey);
-            let stat = nodeStats.get(nodeKey);
-            if (!stat) {
-              stat = { nodeKey, routeCount: 0, maxSplitNodeIdx: -Infinity };
-              nodeStats.set(nodeKey, stat);
-            }
-            stat.routeCount += 1;
-            if (splitNodeIdx > stat.maxSplitNodeIdx) stat.maxSplitNodeIdx = splitNodeIdx;
-          }
-        }
-        const candidates = Array.from(nodeStats.values());
-        if (!candidates.length) return null;
-        candidates.sort((a, b) => {
-          if (b.routeCount !== a.routeCount) return b.routeCount - a.routeCount;
-          return b.maxSplitNodeIdx - a.maxSplitNodeIdx;
-        });
-        return candidates[0].nodeKey;
-      }
-
-      function terminalSplitSideByTurn(routeIdsForTurn) {
-        if (!Array.isArray(routeIdsForTurn) || routeIdsForTurn.length < 2) return null;
-        const nodeKey = chooseBestTerminalSplitNode(routeIdsForTurn);
-        if (!nodeKey) return null;
-
-        const splitContextsByRoute = new Map();
-        for (const rid of routeIdsForTurn) {
-          const contexts = collectRouteNodeContexts(comp, rid, nodeKey)
-            .filter((ctx) => ctx.prevInComp && !ctx.nextInComp && ctx.prev && ctx.next);
-          if (!contexts.length) continue;
-          contexts.sort((a, b) => b.idx - a.idx);
-          splitContextsByRoute.set(rid, contexts[0]);
-        }
-        if (splitContextsByRoute.size < 2) return null;
-
-        let ux = 0;
-        let uy = 0;
-        let uCount = 0;
-        for (const ctx of splitContextsByRoute.values()) {
-          ux += (ctx.curr[1] - ctx.prev[1]);
-          uy += (ctx.curr[0] - ctx.prev[0]);
-          uCount += 1;
-        }
-        if (uCount === 0) return null;
-        ux /= uCount;
-        uy /= uCount;
-        const uLen = Math.hypot(ux, uy);
-        if (!Number.isFinite(uLen) || uLen < 1e-12) return null;
-
-        const turns = [];
-        for (const [rid, ctx] of splitContextsByRoute.entries()) {
-          const vx = ctx.next[1] - ctx.curr[1];
-          const vy = ctx.next[0] - ctx.curr[0];
-          const vLen = Math.hypot(vx, vy);
-          if (!Number.isFinite(vLen) || vLen < 1e-12) continue;
-          const cross = ((ux * vy) - (uy * vx)) / (uLen * vLen);
-          turns.push({ rid, turn: cross });
-        }
-        if (turns.length < 2) return null;
-
-        // Positive cross product = left turn in lon/lat (x=east, y=north).
-        turns.sort((a, b) => {
-          const dt = b.turn - a.turn;
-          if (dt !== 0) return dt;
-          return String(a.rid).localeCompare(String(b.rid));
-        });
-
-        const out = new Map();
-        const n = turns.length;
-        for (let i = 0; i < n; i += 1) {
-          out.set(turns[i].rid, i < (n / 2) ? "L" : "R");
-        }
-        return out;
-      }
-
-      const turnSides = terminalSplitSideByTurn(routeIds);
-      if (turnSides) return turnSides;
-
+    function chooseBestTerminalSplitNode(comp, routeIds) {
       const nodeStats = new Map();
       for (const rid of routeIds) {
         const seenNodesForRoute = new Set();
@@ -1523,12 +1433,301 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       }
       const nodeCandidates = Array.from(nodeStats.values());
       if (!nodeCandidates.length) return null;
-
       nodeCandidates.sort((a, b) => {
         if (b.routeCount !== a.routeCount) return b.routeCount - a.routeCount;
         return b.maxSplitNodeIdx - a.maxSplitNodeIdx;
       });
-      const bestNode = nodeCandidates[0].nodeKey;
+      return nodeCandidates[0].nodeKey;
+    }
+
+    function complementSide(side) {
+      return side === "L" ? "R" : "L";
+    }
+
+    function planarDistDeg(a, b) {
+      const meanLatRad = ((a[0] + b[0]) * 0.5) * (Math.PI / 180);
+      const dx = (b[1] - a[1]) * Math.cos(meanLatRad);
+      const dy = (b[0] - a[0]);
+      return Math.hypot(dx, dy);
+    }
+
+    function terminalSplitTurnData(comp, routeIds) {
+      if (!Array.isArray(routeIds) || routeIds.length < 2) return null;
+      const nodeKey = chooseBestTerminalSplitNode(comp, routeIds);
+      if (!nodeKey) return null;
+
+      const splitContextsByRoute = new Map();
+      for (const rid of routeIds) {
+        const contexts = collectRouteNodeContexts(comp, rid, nodeKey)
+          .filter((ctx) => ctx.prevInComp && !ctx.nextInComp && ctx.prev && ctx.next);
+        if (!contexts.length) continue;
+        contexts.sort((a, b) => b.idx - a.idx);
+        splitContextsByRoute.set(rid, contexts[0]);
+      }
+      if (splitContextsByRoute.size < 2) return null;
+
+      let ux = 0;
+      let uy = 0;
+      let uCount = 0;
+      for (const ctx of splitContextsByRoute.values()) {
+        ux += (ctx.curr[1] - ctx.prev[1]);
+        uy += (ctx.curr[0] - ctx.prev[0]);
+        uCount += 1;
+      }
+      if (uCount === 0) return null;
+      ux /= uCount;
+      uy /= uCount;
+      const uLen = Math.hypot(ux, uy);
+      if (!Number.isFinite(uLen) || uLen < 1e-12) return null;
+      const nx = -uy / uLen;
+      const ny = ux / uLen;
+
+      const out = new Map();
+      for (const [rid, ctx] of splitContextsByRoute.entries()) {
+        const seg = segmentByRouteId.get(rid);
+        let samplePoint = ctx.next;
+        // Look a little further downstream so tiny jitter at the split node
+        // doesn't dominate side classification.
+        if (seg && Array.isArray(seg.points)) {
+          let prevPt = ctx.curr;
+          let acc = 0;
+          for (let i = ctx.idx + 1; i < seg.points.length; i += 1) {
+            const p = seg.points[i];
+            acc += planarDistDeg(prevPt, p);
+            samplePoint = p;
+            prevPt = p;
+            if (acc >= 0.00025) break;
+          }
+        }
+        if (!samplePoint) continue;
+
+        const vx = samplePoint[1] - ctx.curr[1];
+        const vy = samplePoint[0] - ctx.curr[0];
+        const vLen = Math.hypot(vx, vy);
+        if (!Number.isFinite(vLen) || vLen < 1e-12) continue;
+        const turn = ((ux * vy) - (uy * vx)) / (uLen * vLen);
+        const score = (vx * nx) + (vy * ny);
+        out.set(rid, {
+          turn,
+          absTurn: Math.abs(turn),
+          score,
+          absScore: Math.abs(score),
+          side: turn >= 0 ? "L" : "R",
+        });
+      }
+      return out.size >= 2 ? out : null;
+    }
+
+    function terminalTwoRouteEdgeGeometry(comp, routeIds) {
+      if (!Array.isArray(routeIds) || routeIds.length !== 2) return null;
+      const lookahead = 0.0008; // ~90m in lat-deg terms
+      const routeMeta = [];
+
+      for (const rid of routeIds) {
+        const seg = segmentByRouteId.get(rid);
+        if (!seg || !Array.isArray(seg.points) || seg.points.length < 2) return null;
+
+        let maxSharedEdgeIdx = -1;
+        for (const e of comp.edges) {
+          const idx = e.firstEdgeIdxByRoute.get(rid);
+          if (Number.isFinite(idx) && idx > maxSharedEdgeIdx) maxSharedEdgeIdx = idx;
+        }
+        if (maxSharedEdgeIdx < 0 || maxSharedEdgeIdx >= seg.points.length - 1) return null;
+
+        const splitNodeIdx = maxSharedEdgeIdx + 1;
+        if (splitNodeIdx <= 0 || splitNodeIdx >= seg.points.length) return null;
+
+        const curr = seg.points[splitNodeIdx];
+        const prev = seg.points[splitNodeIdx - 1];
+        let sample = null;
+        let acc = 0;
+        let last = curr;
+        for (let i = splitNodeIdx + 1; i < seg.points.length; i += 1) {
+          const p = seg.points[i];
+          acc += planarDistDeg(last, p);
+          sample = p;
+          last = p;
+          if (acc >= lookahead) break;
+        }
+        if (!sample) return null;
+
+        routeMeta.push({
+          rid,
+          curr,
+          prev,
+          sample,
+        });
+      }
+
+      if (routeMeta.length !== 2) return null;
+
+      let ux = 0;
+      let uy = 0;
+      for (const m of routeMeta) {
+        ux += (m.curr[1] - m.prev[1]);
+        uy += (m.curr[0] - m.prev[0]);
+      }
+      ux /= routeMeta.length;
+      uy /= routeMeta.length;
+      const uLen = Math.hypot(ux, uy);
+      if (!Number.isFinite(uLen) || uLen < 1e-12) return null;
+      const nx = -uy / uLen;
+      const ny = ux / uLen;
+
+      const scoreByRid = new Map();
+      const turnByRid = new Map();
+      for (const m of routeMeta) {
+        const vx = m.sample[1] - m.curr[1];
+        const vy = m.sample[0] - m.curr[0];
+        const vLen = Math.hypot(vx, vy);
+        if (!Number.isFinite(vLen) || vLen < 1e-12) return null;
+        const score = (vx * nx) + (vy * ny);
+        const turn = ((ux * vy) - (uy * vx)) / (uLen * vLen);
+        scoreByRid.set(m.rid, score);
+        turnByRid.set(m.rid, turn);
+      }
+
+      const a = routeIds[0];
+      const b = routeIds[1];
+      const sa = scoreByRid.get(a);
+      const sb = scoreByRid.get(b);
+      if (!Number.isFinite(sa) || !Number.isFinite(sb)) return null;
+
+      const sideByRid = new Map();
+      const eps = 1e-12;
+      if (Math.abs(sa - sb) > eps) {
+        sideByRid.set(a, sa > sb ? "L" : "R");
+        sideByRid.set(b, sa > sb ? "R" : "L");
+      } else {
+        const ta = turnByRid.get(a);
+        const tb = turnByRid.get(b);
+        if (Number.isFinite(ta) && Number.isFinite(tb) && Math.abs(ta - tb) > eps) {
+          sideByRid.set(a, ta > tb ? "L" : "R");
+          sideByRid.set(b, ta > tb ? "R" : "L");
+        } else {
+          return null;
+        }
+      }
+
+      const strengthByRid = new Map([
+        [a, Math.abs(sa)],
+        [b, Math.abs(sb)],
+      ]);
+      return { sideByRid, strengthByRid };
+    }
+
+    function terminalTwoRouteSplitEvent(comp, routeIds, rankSides, order) {
+      if (!Array.isArray(routeIds) || routeIds.length !== 2) return null;
+      const leftRid = routeIds[0];
+      const rightRid = routeIds[1];
+      const sideByRid = new Map();
+      const strengthByRid = new Map();
+      const turnData = terminalSplitTurnData(comp, routeIds);
+      const edgeGeom = terminalTwoRouteEdgeGeometry(comp, routeIds);
+
+      if (edgeGeom?.sideByRid?.has(leftRid) && edgeGeom?.sideByRid?.has(rightRid)) {
+        sideByRid.set(leftRid, edgeGeom.sideByRid.get(leftRid));
+        sideByRid.set(rightRid, edgeGeom.sideByRid.get(rightRid));
+        strengthByRid.set(leftRid, edgeGeom.strengthByRid.get(leftRid) || 0);
+        strengthByRid.set(rightRid, edgeGeom.strengthByRid.get(rightRid) || 0);
+      }
+
+      if (
+        sideByRid.size < 2
+        && turnData
+        && turnData.has(leftRid)
+        && turnData.has(rightRid)
+      ) {
+        const a = turnData.get(leftRid);
+        const b = turnData.get(rightRid);
+        const hasScore = Number.isFinite(a?.score) && Number.isFinite(b?.score);
+        const hasTurn = Number.isFinite(a?.turn) && Number.isFinite(b?.turn);
+        if (hasScore && Math.abs(a.score - b.score) > 1e-12) {
+          sideByRid.set(leftRid, a.score > b.score ? "L" : "R");
+          sideByRid.set(rightRid, a.score > b.score ? "R" : "L");
+        } else if (hasTurn && Math.abs(a.turn - b.turn) > 1e-12) {
+          sideByRid.set(leftRid, a.turn > b.turn ? "L" : "R");
+          sideByRid.set(rightRid, a.turn > b.turn ? "R" : "L");
+        }
+        if (Number.isFinite(a?.absScore)) strengthByRid.set(leftRid, a.absScore);
+        if (Number.isFinite(b?.absScore)) strengthByRid.set(rightRid, b.absScore);
+      }
+
+      // Pull in ranked side observations if geometric score didn't fully resolve.
+      for (const rid of routeIds) {
+        if (!sideByRid.has(rid) && rankSides?.has(rid)) sideByRid.set(rid, rankSides.get(rid));
+      }
+
+      if (sideByRid.size === 1) {
+        const knownRid = routeIds.find((rid) => sideByRid.has(rid));
+        const otherRid = routeIds.find((rid) => rid !== knownRid);
+        if (knownRid && otherRid) sideByRid.set(otherRid, complementSide(sideByRid.get(knownRid)));
+      }
+
+      if (sideByRid.size < 2) {
+        const fallbackA = sideForIndex(Math.max(0, order.indexOf(leftRid)), 2);
+        const fallbackB = sideForIndex(Math.max(0, order.indexOf(rightRid)), 2);
+        let sideA = terminalSplitSideForRoute(comp, leftRid, fallbackA);
+        let sideB = terminalSplitSideForRoute(comp, rightRid, fallbackB);
+        if (sideA === sideB) sideB = complementSide(sideA);
+        sideByRid.set(leftRid, sideA);
+        sideByRid.set(rightRid, sideB);
+      } else if (sideByRid.get(leftRid) === sideByRid.get(rightRid)) {
+        sideByRid.set(rightRid, complementSide(sideByRid.get(leftRid)));
+      }
+
+      const candidates = routeIds.map((rid) => {
+        const side = sideByRid.get(rid) || "L";
+        const idx = Math.max(0, order.indexOf(rid));
+        const target = side === "L" ? 0 : 1;
+        const move = Math.abs(target - idx);
+        const td = turnData?.get(rid);
+        const strength = Number.isFinite(strengthByRid.get(rid))
+          ? strengthByRid.get(rid)
+          : (Number.isFinite(td?.absScore)
+            ? td.absScore
+            : (Number.isFinite(td?.absTurn) ? td.absTurn : 0));
+        return { rid, side, move, strength };
+      });
+
+      candidates.sort((a, b) => {
+        if (b.strength !== a.strength) return b.strength - a.strength;
+        if (a.move !== b.move) return a.move - b.move;
+        return String(a.rid).localeCompare(String(b.rid));
+      });
+
+      const chosen = candidates[0];
+      if (!chosen) return null;
+      return { id: chosen.rid, op: "S", side: chosen.side };
+    }
+
+    function terminalSplitSideByRank(comp, routeIds) {
+      function terminalSplitSideByTurn(routeIdsForTurn) {
+        const turnData = terminalSplitTurnData(comp, routeIdsForTurn);
+        if (!turnData) return null;
+        const turns = Array.from(turnData.entries()).map(([rid, info]) => ({ rid, turn: info.turn }));
+        if (turns.length < 2) return null;
+
+        // Positive cross product = left turn in lon/lat (x=east, y=north).
+        turns.sort((a, b) => {
+          const dt = b.turn - a.turn;
+          if (dt !== 0) return dt;
+          return String(a.rid).localeCompare(String(b.rid));
+        });
+
+        const out = new Map();
+        const n = turns.length;
+        for (let i = 0; i < n; i += 1) {
+          out.set(turns[i].rid, i < (n / 2) ? "L" : "R");
+        }
+        return out;
+      }
+
+      const turnSides = terminalSplitSideByTurn(routeIds);
+      if (turnSides) return turnSides;
+
+      const bestNode = chooseBestTerminalSplitNode(comp, routeIds);
+      if (!bestNode) return null;
       const { nx, ny } = normalFromCompAtNode(comp, bestNode, comp.routeIds, "split");
 
       const observed = [];
@@ -1562,20 +1761,26 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     if (terminalOrder.length > 1) {
       const terminalComp = path[path.length - 1];
       const rankSides = terminalSplitSideByRank(terminalComp, terminalOrder);
-      const keepIdx = Math.floor(terminalOrder.length / 2);
-      const terminalSplits = terminalOrder
-        .map((rid, idx) => ({ rid, idx }))
-        .filter((x) => x.idx !== keepIdx)
-        .sort((a, b) => {
-          const da = Math.abs(a.idx - keepIdx);
-          const db = Math.abs(b.idx - keepIdx);
-          if (da !== db) return db - da;
-          return a.idx - b.idx;
-        });
-      for (const { rid, idx } of terminalSplits) {
-        const fallbackSide = sideForIndex(idx, terminalOrder.length);
-        const side = rankSides?.get(rid) || terminalSplitSideForRoute(terminalComp, rid, fallbackSide);
-        traceEventsByRoute.push({ id: rid, op: "S", side });
+
+      if (terminalOrder.length === 2) {
+        const ev = terminalTwoRouteSplitEvent(terminalComp, terminalOrder, rankSides, terminalOrder);
+        if (ev) traceEventsByRoute.push(ev);
+      } else {
+        const keepIdx = Math.floor(terminalOrder.length / 2);
+        const terminalSplits = terminalOrder
+          .map((rid, idx) => ({ rid, idx }))
+          .filter((x) => x.idx !== keepIdx)
+          .sort((a, b) => {
+            const da = Math.abs(a.idx - keepIdx);
+            const db = Math.abs(b.idx - keepIdx);
+            if (da !== db) return db - da;
+            return a.idx - b.idx;
+          });
+        for (const { rid, idx } of terminalSplits) {
+          const fallbackSide = sideForIndex(idx, terminalOrder.length);
+          const side = rankSides?.get(rid) || terminalSplitSideForRoute(terminalComp, rid, fallbackSide);
+          traceEventsByRoute.push({ id: rid, op: "S", side });
+        }
       }
     }
 
@@ -1653,6 +1858,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
 
     const masterRouteOrder = optimizeStartOrder(firstOrder, traceEventsByRoute);
     path[0].order = masterRouteOrder.slice();
+    const initLineOrder = masterRouteOrder.map((rid) => lineIdForRoute(rid));
 
     // Keep path component orders aligned with the same event replay used for
     // trace output so rendered lane ordering matches the console order.
@@ -1670,7 +1876,7 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     }));
 
     if (emitEvents) {
-      traceOut.push({ init: firstLineOrder.slice() });
+      traceOut.push({ init: initLineOrder.slice() });
       for (const ev of displayEvents) traceOut.push({ ...ev });
     }
 
