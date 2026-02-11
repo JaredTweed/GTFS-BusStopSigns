@@ -1,15 +1,9 @@
 html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; color: #111; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-.topbar {
-  display:flex; align-items:center; justify-content:space-between;
-  padding: 12px 14px; border-bottom: 1px solid #e8e8e8; background:#fff; gap: 12px;
-  position: sticky; top:0; z-index: 999;
-}
-.brand { font-weight: 800; font-size: 18px; }
 .muted { color: #666; }
 .small { font-size: 12px; line-height: 1.35; }
 
-.layout { display:grid; grid-template-columns: 1fr 340px; height: calc(100% - 56px); }
+.layout { display:grid; grid-template-columns: 1fr 340px; height: 100%; }
 .map { height: 100%; }
 .side { border-left: 1px solid #eee; background: #fafafa; padding: 12px; overflow:auto; }
 
@@ -26,6 +20,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 .btn:hover { filter: brightness(0.98); }
 .fileBtn { display:inline-flex; align-items:center; gap: 8px; }
 .fileBtn input { display:none; }
+.sideActions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.sideActions .btn { width: 100%; min-width: 0; max-width: none; justify-content: center; box-sizing: border-box; font-size: 16px; }
+.sideActions__status { display: block; text-align: center; width: 100%; }
 
 .modal.hidden { display:none; }
 .modal { position: fixed; inset: 0; z-index: 2000; display:flex; align-items: stretch; justify-content: center; }

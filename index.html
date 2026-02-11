@@ -27,26 +27,19 @@
 </head>
 
 <body>
-  <header class="topbar">
-    <div class="topbar__left">
-      <div class="brand">Bus Stop Map</div>
-      <div class="muted">Click a stop → download a sign PNG/SVG</div>
-    </div>
-
-    <div class="topbar__right">
-      <button id="reloadBtn" class="btn btn--ghost" title="Download latest GTFS data" style="display:none;">Download Updated GTFS File</button>
-      <span id="updatesStatus" class="muted small" style="display:none;">GTFS Uploaded</span>
-      <label class="btn btn--ghost fileBtn" title="Load a different GTFS zip">
-        Upload GTFS ZIP
-        <input id="gtfsFile" type="file" accept=".zip" />
-      </label>
-    </div>
-  </header>
-
   <main class="layout">
     <section id="map" class="map"></section>
 
     <aside class="side">
+      <div class="card sideActions">
+        <button id="reloadBtn" class="btn btn--ghost" title="Download latest GTFS data" style="display:none;">Download Updated GTFS File</button>
+        <span id="updatesStatus" class="muted small sideActions__status" style="display:none;">GTFS Uploaded</span>
+        <label class="btn btn--ghost fileBtn" title="Load a different GTFS zip">
+          Upload GTFS ZIP
+          <input id="gtfsFile" type="file" accept=".zip" />
+        </label>
+      </div>
+
       <div class="card">
         <div class="card__title">Data status</div>
         <div class="kv">
