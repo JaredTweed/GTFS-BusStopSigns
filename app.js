@@ -1916,6 +1916,23 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       return out;
     }
 
+    function hasFutureRejoinAfterTerminalSplit(comp, splitRid, keepRid, excludedCompIds = null) {
+      if (!comp || !splitRid || !keepRid) return false;
+      const baseDist = compDist2Stop(comp);
+      if (!Number.isFinite(baseDist)) return false;
+      const eps = 1e-12;
+
+      for (const cand of components) {
+        if (!cand || cand.id === comp.id) continue;
+        if (excludedCompIds && excludedCompIds.has(cand.id)) continue;
+        const d = compDist2Stop(cand);
+        if (!Number.isFinite(d) || d <= baseDist + eps) continue;
+        if (!cand.routeIds.includes(splitRid) || !cand.routeIds.includes(keepRid)) continue;
+        return true;
+      }
+      return false;
+    }
+
     // Shared-overlap tracing stops at the final shared component. If multiple
     // routes are still overlapped there, represent terminal divergence by
     // splitting all but one "main" route and infer side from geometry.
@@ -1923,10 +1940,17 @@ function buildSharedEdges(segments, stop = null, options = {}) {
     if (terminalOrder.length > 1) {
       const terminalComp = path[path.length - 1];
       const rankSides = terminalSplitSideByRank(terminalComp, terminalOrder);
+      const pathCompIds = new Set(path.map((c) => c.id));
 
       if (terminalOrder.length === 2) {
         const ev = terminalTwoRouteSplitEvent(terminalComp, terminalOrder, rankSides, terminalOrder);
-        if (ev) traceEventsByRoute.push(ev);
+        if (ev) {
+          traceEventsByRoute.push(ev);
+          const keepRid = terminalOrder.find((rid) => rid !== ev.id);
+          if (keepRid && hasFutureRejoinAfterTerminalSplit(terminalComp, ev.id, keepRid, pathCompIds)) {
+            traceEventsByRoute.push({ id: ev.id, op: "M", side: complementSide(ev.side) });
+          }
+        }
       } else {
         const keepIdx = Math.floor(terminalOrder.length / 2);
         const terminalSplits = terminalOrder
@@ -2011,6 +2035,22 @@ function buildSharedEdges(segments, stop = null, options = {}) {
       for (const ev of (stepEvents[i - 1] || [])) bubbleRouteToSide(replayOrder, ev.id, ev.side);
       const projected = replayOrder.filter((rid) => path[i].routeIds.includes(rid));
       if (projected.length) path[i].order = projected;
+    }
+
+    // Keep non-trace downstream overlap components consistent with the full
+    // event replay so rendered lane order matches the reported event/order log.
+    const finalReplayOrder = masterRouteOrder.slice();
+    for (const ev of traceEventsByRoute) bubbleRouteToSide(finalReplayOrder, ev.id, ev.side);
+    const pathCompIdsForOrder = new Set(path.map((c) => c.id));
+    const terminalPathDist = compDist2Stop(path[path.length - 1]);
+    const downstreamEps = 1e-12;
+
+    for (const comp of components) {
+      if (pathCompIdsForOrder.has(comp.id)) continue;
+      const d = compDist2Stop(comp);
+      if (!Number.isFinite(d) || d <= terminalPathDist + downstreamEps) continue;
+      const projected = finalReplayOrder.filter((rid) => comp.routeIds.includes(rid));
+      if (projected.length) comp.order = projected;
     }
 
     const displayEvents = traceEventsByRoute.map((ev) => ({
