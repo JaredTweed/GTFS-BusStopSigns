@@ -45,44 +45,6 @@ function formatClockTimeFromSeconds(sec) {
   return dayOffset > 0 ? `${base}+${dayOffset}` : base;
 }
 
-function summarizeFrequencyWindows(timesSec) {
-  const sorted = (timesSec || [])
-    .filter((x) => Number.isFinite(x))
-    .sort((a, b) => a - b);
-  if (sorted.length < 2) return [];
-
-  const windows = [];
-  let startIdx = 0;
-  let gaps = [];
-
-  const flushWindow = (endIdxExclusive) => {
-    if (endIdxExclusive - startIdx < 2) return;
-    const valid = gaps.filter((g) => g >= 2 && g <= 180);
-    if (valid.length === 0) return;
-    const minGap = Math.round(Math.min(...valid));
-    const maxGap = Math.round(Math.max(...valid));
-    const from = formatClockTimeFromSeconds(sorted[startIdx]);
-    const to = formatClockTimeFromSeconds(sorted[endIdxExclusive - 1]);
-    windows.push({ from, to, minGap, maxGap });
-  };
-
-  for (let i = 1; i < sorted.length; i += 1) {
-    const gapMin = (sorted[i] - sorted[i - 1]) / 60;
-    const mid = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : null;
-    const gapBreak = gapMin > 120;
-    const shiftBreak = mid != null && (gapMin > (mid * 2) || gapMin < (mid / 2));
-    if (gapBreak || shiftBreak) {
-      flushWindow(i);
-      startIdx = i;
-      gaps = [];
-      continue;
-    }
-    gaps.push(gapMin);
-  }
-  flushWindow(sorted.length);
-  return windows;
-}
-
 function buildActiveHoursText(timesSec = []) {
   const sorted = (timesSec || [])
     .filter((x) => Number.isFinite(x))
@@ -144,7 +106,6 @@ function buildSummaryItemsFromAgg(aggMap, routesById) {
       shape_id: shapeId,
       route_short_name: shortName,
       route_color: normalizeColor(r?.route_color, "#3b82f6"),
-      frequency_windows: summarizeFrequencyWindows(x.times),
       active_hours_text: buildGroupedActiveHoursText(x.timesByGroup, x.times),
     };
   });

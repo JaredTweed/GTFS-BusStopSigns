@@ -79,51 +79,6 @@ def format_clock(sec):
     return f"{base}+{day_offset}" if day_offset > 0 else base
 
 
-def summarize_frequency_windows(times_sec):
-    sorted_times = sorted(x for x in times_sec if isinstance(x, (int, float)))
-    if len(sorted_times) < 2:
-        return []
-
-    windows = []
-    start_idx = 0
-    gaps = []
-
-    def flush_window(end_idx_exclusive):
-        nonlocal gaps
-        if end_idx_exclusive - start_idx < 2:
-            return
-        valid = [g for g in gaps if 2 <= g <= 180]
-        if not valid:
-            return
-        windows.append(
-            {
-                "from": format_clock(sorted_times[start_idx]),
-                "to": format_clock(sorted_times[end_idx_exclusive - 1]),
-                "minGap": round(min(valid)),
-                "maxGap": round(max(valid)),
-            }
-        )
-
-    for i in range(1, len(sorted_times)):
-        gap_min = (sorted_times[i] - sorted_times[i - 1]) / 60.0
-        if gaps:
-            sorted_gaps = sorted(gaps)
-            mid = sorted_gaps[len(sorted_gaps) // 2]
-        else:
-            mid = None
-        gap_break = gap_min > 120
-        shift_break = (mid is not None) and (gap_min > (mid * 2) or gap_min < (mid / 2))
-        if gap_break or shift_break:
-            flush_window(i)
-            start_idx = i
-            gaps = []
-            continue
-        gaps.append(gap_min)
-
-    flush_window(len(sorted_times))
-    return windows
-
-
 def build_active_hours_text(times_sec):
     sorted_times = sorted(x for x in times_sec if isinstance(x, (int, float)))
     if not sorted_times:
@@ -269,7 +224,6 @@ def build_summary_items(agg_items, routes_by_id):
                 headsign = cand
                 headsign_max = n
 
-        windows = summarize_frequency_windows(x["times"])
         items.append(
             {
                 "route_id": x["route_id"],
@@ -279,7 +233,6 @@ def build_summary_items(agg_items, routes_by_id):
                 "shape_id": shape_id,
                 "route_short_name": short_name,
                 "route_color": normalize_color(route.get("route_color"), "#3b82f6"),
-                "frequency_windows": windows,
                 "active_hours_text": build_grouped_active_hours_text(x["timesByGroup"], x["times"]),
             }
         )
@@ -294,6 +247,22 @@ def build_summary_items(agg_items, routes_by_id):
 
     items.sort(key=lambda i: (-i.get("count", 0), sort_key(i)))
     return items
+
+
+COMPACT_ITEM_FIELDS = [
+    "route_id",
+    "direction_id",
+    "headsign",
+    "count",
+    "shape_id",
+    "route_short_name",
+    "route_color",
+    "active_hours_text",
+]
+
+
+def encode_compact_summary_item(item):
+    return [item.get(field) for field in COMPACT_ITEM_FIELDS]
 
 
 with zipfile.ZipFile(ZIP_PATH, "r") as zf:
@@ -392,18 +361,15 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
                 else:
                     cur["times"].append(dep_sec)
 
-        agg_0 = {k: v for k, v in agg_all.items() if str(v["direction_id"]) == "0"}
-        agg_1 = {k: v for k, v in agg_all.items() if str(v["direction_id"]) == "1"}
-        output_stops[stop_id] = {
-            "all": build_summary_items(agg_all, routes_by_id),
-            "0": build_summary_items(agg_0, routes_by_id),
-            "1": build_summary_items(agg_1, routes_by_id),
-        }
+        all_items = build_summary_items(agg_all, routes_by_id)
+        if all_items:
+            output_stops[stop_id] = [encode_compact_summary_item(item) for item in all_items]
 
     out = {
-        "version": 1,
+        "version": 2,
         "generated_at": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "source_zip": os.path.basename(ZIP_PATH),
+        "item_fields": COMPACT_ITEM_FIELDS,
         "stops": output_stops,
     }
 

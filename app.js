@@ -108,6 +108,16 @@ const SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX = 0;
 const SIGN_ROUTE_GROUP_LANE_OVERLAP_PX = 0.45;
 const STOP_OVERLAY_TRIP_CANDIDATE_LIMIT = 24;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
+const PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS = [
+  "route_id",
+  "direction_id",
+  "headsign",
+  "count",
+  "shape_id",
+  "route_short_name",
+  "route_color",
+  "active_hours_text",
+];
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
 const TRANSLINK_LATEST_GTFS_URL = "https://gtfs-static.translink.ca/gtfs/google_transit.zip";
@@ -380,50 +390,6 @@ function formatClockTimeFromSeconds(sec) {
   const ampm = h24 >= 12 ? "pm" : "am";
   const base = `${h12}:${String(m).padStart(2, "0")}${ampm}`;
   return dayOffset > 0 ? `${base}+${dayOffset}` : base;
-}
-
-function summarizeFrequencyWindows(timesSec) {
-  const sorted = (timesSec || [])
-    .filter((x) => Number.isFinite(x))
-    .sort((a, b) => a - b);
-  if (sorted.length < 2) return [];
-
-  const windows = [];
-  let startIdx = 0;
-  let gaps = [];
-
-  const flushWindow = (endIdxExclusive) => {
-    if (endIdxExclusive - startIdx < 2) return;
-    const valid = gaps.filter((g) => g >= 2 && g <= 180);
-    if (valid.length === 0) return;
-    const minGap = Math.round(Math.min(...valid));
-    const maxGap = Math.round(Math.max(...valid));
-    const from = formatClockTimeFromSeconds(sorted[startIdx]);
-    const to = formatClockTimeFromSeconds(sorted[endIdxExclusive - 1]);
-    windows.push({
-      from,
-      to,
-      minGap,
-      maxGap,
-    });
-  };
-
-  for (let i = 1; i < sorted.length; i += 1) {
-    const gapMin = (sorted[i] - sorted[i - 1]) / 60;
-    const mid = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : null;
-    const gapBreak = gapMin > 120;
-    const shiftBreak = mid != null && (gapMin > (mid * 2) || gapMin < (mid / 2));
-    if (gapBreak || shiftBreak) {
-      flushWindow(i);
-      startIdx = i;
-      gaps = [];
-      continue;
-    }
-    gaps.push(gapMin);
-  }
-  flushWindow(sorted.length);
-
-  return windows;
 }
 
 function buildActiveHoursText(timesSec = []) {
@@ -3653,8 +3619,6 @@ function computeRouteSummaryForStop(stop, directionFilter) {
         headsignMax = n;
       }
     }
-    const windows = summarizeFrequencyWindows(x.times);
-
     return {
       route_id: x.route_id,
       direction_id: x.direction_id,
@@ -3663,7 +3627,6 @@ function computeRouteSummaryForStop(stop, directionFilter) {
       shape_id: shapeId,
       route_short_name: shortName,
       route_color: normalizeColor(r?.route_color, "#3b82f6"),
-      frequency_windows: windows,
       active_hours_text: buildGroupedActiveHoursText(x.timesByGroup, x.times),
     };
   });
@@ -3687,21 +3650,107 @@ function routeSummaryCacheKey(stopId, directionFilter) {
   return `${stopId}::${directionFilter}`;
 }
 
+function normalizeDirectionId(v) {
+  if (v == null || v === "") return null;
+  return String(v);
+}
+
+function normalizePreloadedSummaryItem(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const routeId = raw.route_id;
+  if (!routeId) return null;
+  const countRaw = Number.parseInt(raw.count, 10);
+  return {
+    route_id: String(routeId),
+    direction_id: normalizeDirectionId(raw.direction_id),
+    headsign: String(raw.headsign || ""),
+    count: Number.isFinite(countRaw) ? countRaw : 0,
+    shape_id: raw.shape_id ? String(raw.shape_id) : null,
+    route_short_name: String(raw.route_short_name || ""),
+    route_color: normalizeColor(raw.route_color, "#3b82f6"),
+    active_hours_text: String(raw.active_hours_text || ""),
+  };
+}
+
+function decodeCompactPreloadedSummaryItem(row, fieldIndexByName) {
+  if (!Array.isArray(row)) return null;
+  const read = (fieldName, fallback = null) => {
+    const idx = fieldIndexByName.get(fieldName);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= row.length) return fallback;
+    const v = row[idx];
+    return v == null ? fallback : v;
+  };
+
+  const routeId = read("route_id", "");
+  if (!routeId) return null;
+  const countRaw = Number.parseInt(read("count", 0), 10);
+  return {
+    route_id: String(routeId),
+    direction_id: normalizeDirectionId(read("direction_id", null)),
+    headsign: String(read("headsign", "")),
+    count: Number.isFinite(countRaw) ? countRaw : 0,
+    shape_id: read("shape_id", null) ? String(read("shape_id", null)) : null,
+    route_short_name: String(read("route_short_name", "")),
+    route_color: normalizeColor(read("route_color", "#3b82f6"), "#3b82f6"),
+    active_hours_text: String(read("active_hours_text", "")),
+  };
+}
+
+function normalizePreloadedSummaryItems(rawItems, itemFields = PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return [];
+
+  const fields = (Array.isArray(itemFields) && itemFields.length)
+    ? itemFields
+    : PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS;
+  const fieldIndexByName = new Map();
+  for (let i = 0; i < fields.length; i += 1) fieldIndexByName.set(String(fields[i]), i);
+
+  const out = [];
+  for (const raw of rawItems) {
+    const item = Array.isArray(raw)
+      ? decodeCompactPreloadedSummaryItem(raw, fieldIndexByName)
+      : normalizePreloadedSummaryItem(raw);
+    if (item) out.push(item);
+  }
+  return out;
+}
+
+function summaryItemsForDirection(items, directionFilter) {
+  if (!Array.isArray(items)) return [];
+  if (directionFilter === "all") return items;
+  const wanted = String(directionFilter);
+  return items.filter((item) => String(item?.direction_id ?? "") === wanted);
+}
+
 function loadRouteSummaryCacheFromData(preloadData) {
   if (!preloadData || typeof preloadData !== "object") return false;
   const stopsObj = preloadData.stops;
   if (!stopsObj || typeof stopsObj !== "object") return false;
 
   const nextCache = new Map();
-  const directions = ["all", "0", "1"];
-  for (const [stopId, byDirection] of Object.entries(stopsObj)) {
-    if (!stopId || !byDirection || typeof byDirection !== "object") continue;
-    for (const dir of directions) {
-      const items = byDirection[dir];
-      if (!Array.isArray(items)) continue;
-      nextCache.set(routeSummaryCacheKey(stopId, dir), items);
+  const version = Number.parseInt(preloadData.version, 10) || 1;
+  if (version >= 2) {
+    const itemFields = Array.isArray(preloadData.item_fields)
+      ? preloadData.item_fields
+      : PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS;
+    for (const [stopId, rawItems] of Object.entries(stopsObj)) {
+      if (!stopId) continue;
+      const items = normalizePreloadedSummaryItems(rawItems, itemFields);
+      if (items.length === 0) continue;
+      nextCache.set(routeSummaryCacheKey(stopId, "all"), items);
+    }
+  } else {
+    const directions = ["all", "0", "1"];
+    for (const [stopId, byDirection] of Object.entries(stopsObj)) {
+      if (!stopId || !byDirection || typeof byDirection !== "object") continue;
+      for (const dir of directions) {
+        const items = normalizePreloadedSummaryItems(byDirection[dir], PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS);
+        if (items.length === 0) continue;
+        nextCache.set(routeSummaryCacheKey(stopId, dir), items);
+      }
     }
   }
+
   if (nextCache.size === 0) return false;
   routeSummaryCache = nextCache;
   return true;
@@ -3810,6 +3859,15 @@ function getRouteSummaryForStop(stop, directionFilter) {
   const key = routeSummaryCacheKey(stop.stop_id, directionFilter);
   const cached = routeSummaryCache.get(key);
   if (cached !== undefined) return cached;
+
+  if (directionFilter !== "all") {
+    const allItems = routeSummaryCache.get(routeSummaryCacheKey(stop.stop_id, "all"));
+    if (allItems !== undefined) {
+      const filtered = summaryItemsForDirection(allItems, directionFilter);
+      routeSummaryCache.set(key, filtered);
+      return filtered;
+    }
+  }
 
   const computed = computeRouteSummaryForStop(stop, directionFilter);
   routeSummaryCache.set(key, computed);
