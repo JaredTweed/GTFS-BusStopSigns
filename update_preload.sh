@@ -4,6 +4,31 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ZIP_PATH="${1:-${ROOT_DIR}/google_transit.zip}"
 OUT_PATH="${2:-${ROOT_DIR}/preloaded_route_summaries.json}"
+GTFS_URL="${GTFS_URL:-https://gtfs-static.translink.ca/gtfs/google_transit.zip}"
+
+download_gtfs_zip() {
+    local url="$1"
+    local out="$2"
+    local tmp
+
+    mkdir -p "$(dirname "$out")"
+    tmp="$(mktemp "${out}.tmp.XXXXXX")"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl --fail --location --silent --show-error "$url" --output "$tmp"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$tmp" "$url"
+    else
+        echo "Error: curl or wget is required to download GTFS data." >&2
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv "$tmp" "$out"
+    echo "Updated GTFS zip: ${out}"
+}
+
+download_gtfs_zip "$GTFS_URL" "$ZIP_PATH"
 
 python3 - "$ZIP_PATH" "$OUT_PATH" <<'PY'
 import csv
