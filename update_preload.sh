@@ -265,6 +265,83 @@ def encode_compact_summary_item(item):
     return [item.get(field) for field in COMPACT_ITEM_FIELDS]
 
 
+STOP_OVERLAY_TRIP_CANDIDATE_LIMIT = 24
+
+
+def normalize_headsign_key(v):
+    return str(v or "").strip().lower()
+
+
+def route_shape_direction_key(route_id, shape_id, direction_id):
+    return f"{route_id or ''}::{shape_id or ''}::{direction_id or ''}"
+
+
+def route_shape_key_only(route_id, shape_id):
+    return f"{route_id or ''}::{shape_id or ''}"
+
+
+def route_shape_direction_headsign_key(route_id, shape_id, direction_id, headsign):
+    return f"{route_shape_direction_key(route_id, shape_id, direction_id)}::{normalize_headsign_key(headsign)}"
+
+
+def add_trip_candidate(index_obj, key, trip_id):
+    if not key or not trip_id:
+        return
+    arr = index_obj.setdefault(key, [])
+    if trip_id not in arr:
+        arr.append(trip_id)
+
+
+def trip_candidate_ids_for_summary_item(item, by_rsdh, by_rsd, by_rs):
+    route_id = str(item.get("route_id") or "").strip()
+    shape_id = str(item.get("shape_id") or "").strip()
+    if not route_id or not shape_id:
+        return []
+
+    direction_raw = item.get("direction_id")
+    direction_id = "" if direction_raw is None else str(direction_raw).strip()
+    headsign = str(item.get("headsign") or "").strip()
+
+    keys = [
+        route_shape_direction_headsign_key(route_id, shape_id, direction_id, headsign),
+        route_shape_direction_key(route_id, shape_id, direction_id),
+        route_shape_key_only(route_id, shape_id),
+    ]
+    pools = [by_rsdh, by_rsd, by_rs]
+
+    out = []
+    seen = set()
+    for idx, key in enumerate(keys):
+        for trip_id in pools[idx].get(key, []):
+            if trip_id in seen:
+                continue
+            seen.add(trip_id)
+            out.append(trip_id)
+            if len(out) >= STOP_OVERLAY_TRIP_CANDIDATE_LIMIT:
+                return out
+    return out
+
+
+def build_downstream_stop_ids(stop_id, trip_stop_ids):
+    if not stop_id or not trip_stop_ids:
+        return []
+    sid = str(stop_id)
+    try:
+        start_idx = trip_stop_ids.index(sid)
+    except ValueError:
+        return []
+
+    out = []
+    seen = set()
+    for raw in trip_stop_ids[start_idx + 1 :]:
+        next_sid = str(raw or "")
+        if not next_sid or next_sid == sid or next_sid in seen:
+            continue
+        seen.add(next_sid)
+        out.append(next_sid)
+    return out
+
+
 with zipfile.ZipFile(ZIP_PATH, "r") as zf:
     stops = read_csv_rows(zf, "stops.txt")
     routes = read_csv_rows(zf, "routes.txt")
@@ -274,28 +351,66 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
 
     routes_by_id = {r.get("route_id"): r for r in routes if r.get("route_id")}
     trips_by_id = {}
+    candidate_trips_by_rsdh = {}
+    candidate_trips_by_rsd = {}
+    candidate_trips_by_rs = {}
     for t in trips:
         tid = t.get("trip_id")
         if not tid:
             continue
+        route_id = t.get("route_id")
+        direction_id = str(t.get("direction_id", "") or "")
+        trip_headsign = t.get("trip_headsign") or ""
+        shape_id = str(t.get("shape_id", "") or "")
+        service_id = str(t.get("service_id", "") or "")
         trips_by_id[tid] = {
-            "route_id": t.get("route_id"),
-            "direction_id": str(t.get("direction_id", "") or ""),
-            "trip_headsign": t.get("trip_headsign") or "",
-            "shape_id": str(t.get("shape_id", "") or ""),
-            "service_id": str(t.get("service_id", "") or ""),
+            "route_id": route_id,
+            "direction_id": direction_id,
+            "trip_headsign": trip_headsign,
+            "shape_id": shape_id,
+            "service_id": service_id,
         }
+
+        rid = str(route_id or "").strip()
+        sid = str(shape_id or "").strip()
+        if rid and sid:
+            add_trip_candidate(
+                candidate_trips_by_rsdh,
+                route_shape_direction_headsign_key(rid, sid, direction_id.strip(), trip_headsign),
+                tid,
+            )
+            add_trip_candidate(
+                candidate_trips_by_rsd,
+                route_shape_direction_key(rid, sid, direction_id.strip()),
+                tid,
+            )
+            add_trip_candidate(
+                candidate_trips_by_rs,
+                route_shape_key_only(rid, sid),
+                tid,
+            )
 
     has_service_calendar_data = bool(calendar or calendar_dates)
     service_dates_by_id, weekday_by_date = build_service_active_dates_last_week(calendar, calendar_dates)
 
     # stop_id -> trip_id -> earliest departure seconds
     stop_trip_time = {}
+    # trip_id -> [(stop_sequence, stop_id)...] for downstream stop overlays
+    trip_stop_rows = {}
     for row in iter_csv_rows(zf, "stop_times.txt"):
         stop_id = row.get("stop_id")
         trip_id = row.get("trip_id")
         if not stop_id or not trip_id:
             continue
+
+        seq_raw = row.get("stop_sequence")
+        try:
+            seq = int(seq_raw)
+        except (TypeError, ValueError):
+            seq = None
+        rows = trip_stop_rows.setdefault(trip_id, [])
+        rows.append((seq if seq is not None else len(rows), str(stop_id)))
+
         dep = parse_time_to_seconds(row.get("departure_time"))
         if dep is None:
             dep = parse_time_to_seconds(row.get("arrival_time"))
@@ -307,11 +422,25 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
         if prev is None or dep < prev:
             by_trip[trip_id] = dep
 
+    trip_stop_ids_by_trip = {}
+    for trip_id, rows in trip_stop_rows.items():
+        rows.sort(key=lambda x: x[0])
+        seq_stops = []
+        last_key = None
+        for seq, sid in rows:
+            key = f"{seq}::{sid}"
+            if key == last_key:
+                continue
+            last_key = key
+            seq_stops.append(sid)
+        trip_stop_ids_by_trip[trip_id] = seq_stops
+
     stop_ids = [s.get("stop_id") for s in stops if s.get("stop_id")]
     stop_ids_set = set(stop_ids)
     stop_ids.extend([sid for sid in stop_trip_time.keys() if sid not in stop_ids_set])
 
     output_stops = {}
+    output_stop_overlays = {}
     for stop_id in stop_ids:
         trips_for_stop = stop_trip_time.get(stop_id, {})
         agg_all = {}
@@ -365,12 +494,51 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
         if all_items:
             output_stops[stop_id] = [encode_compact_summary_item(item) for item in all_items]
 
+            overlays_for_stop = {}
+            for item in all_items:
+                route_id = str(item.get("route_id") or "").strip()
+                shape_id = str(item.get("shape_id") or "").strip()
+                if not route_id or not shape_id:
+                    continue
+                route_shape_key = route_shape_key_only(route_id, shape_id)
+                if route_shape_key in overlays_for_stop:
+                    continue
+
+                candidates = trip_candidate_ids_for_summary_item(
+                    item,
+                    candidate_trips_by_rsdh,
+                    candidate_trips_by_rsd,
+                    candidate_trips_by_rs,
+                )
+                best_trip_stops = []
+                best_downstream_count = -1
+                for trip_id in candidates:
+                    trip_stop_ids = trip_stop_ids_by_trip.get(trip_id, [])
+                    if not trip_stop_ids:
+                        continue
+                    try:
+                        idx = trip_stop_ids.index(str(stop_id))
+                    except ValueError:
+                        continue
+                    downstream_count = len(trip_stop_ids) - idx - 1
+                    if downstream_count > best_downstream_count:
+                        best_trip_stops = trip_stop_ids
+                        best_downstream_count = downstream_count
+
+                downstream_stop_ids = build_downstream_stop_ids(stop_id, best_trip_stops)
+                if downstream_stop_ids:
+                    overlays_for_stop[route_shape_key] = downstream_stop_ids
+
+            if overlays_for_stop:
+                output_stop_overlays[stop_id] = overlays_for_stop
+
     out = {
-        "version": 2,
+        "version": 3,
         "generated_at": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "source_zip": os.path.basename(ZIP_PATH),
         "item_fields": COMPACT_ITEM_FIELDS,
         "stops": output_stops,
+        "stop_overlays": output_stop_overlays,
     }
 
     with open(OUT_PATH, "w", encoding="utf-8") as fh:

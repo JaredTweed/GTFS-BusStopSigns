@@ -59,6 +59,7 @@ let selectedStopRouteSummary = null;
 let signRenderToken = 0;
 const tileImageCache = new Map();
 let routeSummaryCache = new Map(); // `${stop_id}::${direction}` -> summary array
+let preloadedStopOverlayByStop = new Map(); // stop_id -> Map(route_id::shape_id -> [downstream_stop_id...])
 let showStopsOnSign = false;
 let activeZip = null;
 let bootGeneration = 0;
@@ -71,6 +72,11 @@ let candidateTripsByRouteShapeDirection = new Map();
 let candidateTripsByRouteShape = new Map();
 let tripStopsByTripId = new Map(); // trip_id -> [stop_id... in stop_sequence order]
 let routeStopsOverlayCache = new Map(); // stop_id + segment signature -> Map(route_shape_key -> marker[])
+let stopOverlayWorker = null;
+let stopOverlayWorkerReady = false;
+let stopOverlayWorkerInitPromise = null;
+let stopOverlayWorkerRequestSeq = 0;
+let stopOverlayWorkerPending = new Map(); // req_id -> {resolve, reject}
 
 const MAP_LINE_PALETTE = [
   "#e63946", "#1d3557", "#2a9d8f", "#f4a261", "#6a4c93",
@@ -119,6 +125,7 @@ const PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS = [
   "active_hours_text",
 ];
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
+const STOP_OVERLAY_WORKER_URL = "./stop_overlay_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
 const TRANSLINK_LATEST_GTFS_URL = "https://gtfs-static.translink.ca/gtfs/google_transit.zip";
 const FIXED_DIRECTION_FILTER = "all";
@@ -472,6 +479,104 @@ function resetTripStopOverlayCaches() {
   candidateTripsByRouteShape = new Map();
   tripStopsByTripId = new Map();
   routeStopsOverlayCache = new Map();
+  if (stopOverlayWorker) {
+    try { stopOverlayWorker.terminate(); } catch {}
+  }
+  stopOverlayWorker = null;
+  stopOverlayWorkerReady = false;
+  stopOverlayWorkerInitPromise = null;
+  stopOverlayWorkerRequestSeq = 0;
+  for (const pending of stopOverlayWorkerPending.values()) {
+    try { pending.reject(new Error("Stop overlay worker reset")); } catch {}
+  }
+  stopOverlayWorkerPending = new Map();
+}
+
+function ensureStopOverlayWorker() {
+  if (stopOverlayWorker) return stopOverlayWorker;
+  if (typeof Worker === "undefined") return null;
+
+  stopOverlayWorker = new Worker(STOP_OVERLAY_WORKER_URL);
+  stopOverlayWorker.onmessage = (ev) => {
+    const msg = ev.data || {};
+    if (msg.type === "progress") return;
+
+    const reqId = Number(msg.requestId);
+    if (!Number.isFinite(reqId)) return;
+    const pending = stopOverlayWorkerPending.get(reqId);
+    if (!pending) return;
+    stopOverlayWorkerPending.delete(reqId);
+
+    if (msg.type === "error") {
+      pending.reject(new Error(msg.error || "Stop overlay worker error"));
+      return;
+    }
+    pending.resolve(msg);
+  };
+
+  stopOverlayWorker.onerror = (err) => {
+    console.warn("Stop overlay worker failed.", err);
+    const failErr = new Error(err?.message || "Stop overlay worker runtime error");
+    for (const pending of stopOverlayWorkerPending.values()) {
+      try { pending.reject(failErr); } catch {}
+    }
+    stopOverlayWorkerPending = new Map();
+    try { stopOverlayWorker?.terminate(); } catch {}
+    stopOverlayWorker = null;
+    stopOverlayWorkerReady = false;
+    stopOverlayWorkerInitPromise = null;
+    stopOverlayWorkerRequestSeq = 0;
+  };
+
+  return stopOverlayWorker;
+}
+
+function requestStopOverlayWorker(type, payload = {}, transfer = []) {
+  const worker = ensureStopOverlayWorker();
+  if (!worker) return Promise.reject(new Error("Worker API unavailable"));
+
+  const requestId = ++stopOverlayWorkerRequestSeq;
+  return new Promise((resolve, reject) => {
+    stopOverlayWorkerPending.set(requestId, { resolve, reject });
+    worker.postMessage({ type, requestId, ...payload }, transfer);
+  });
+}
+
+async function ensureStopOverlayWorkerIndex() {
+  if (stopOverlayWorkerReady) return true;
+  if (stopOverlayWorkerInitPromise) return stopOverlayWorkerInitPromise;
+  if (!activeZip) return false;
+  const stopTimesFile = activeZip.file("stop_times.txt");
+  if (!stopTimesFile) return false;
+  if (!ensureStopOverlayWorker()) return false;
+
+  stopOverlayWorkerInitPromise = (async () => {
+    try {
+      const stopTimesBuffer = await stopTimesFile.async("arraybuffer");
+      await requestStopOverlayWorker("build_index", { stopTimesBuffer }, [stopTimesBuffer]);
+      stopOverlayWorkerReady = true;
+      return true;
+    } catch (err) {
+      console.warn("Stop overlay worker index build failed.", err);
+      stopOverlayWorkerReady = false;
+      return false;
+    } finally {
+      stopOverlayWorkerInitPromise = null;
+    }
+  })();
+
+  return stopOverlayWorkerInitPromise;
+}
+
+async function prewarmStopOverlayData(generationAtStart) {
+  if (generationAtStart !== bootGeneration) return;
+  try {
+    await ensureTripsLoadedForStopOverlay();
+    if (generationAtStart !== bootGeneration) return;
+    await ensureStopOverlayWorkerIndex();
+  } catch (err) {
+    console.warn("Stop overlay prewarm failed.", err);
+  }
 }
 
 function normalizeHeadsignKey(v) {
@@ -585,18 +690,13 @@ function tripCandidateIdsForSegment(seg) {
   return out;
 }
 
-async function ensureTripStopSequencesForTripIds(tripIds) {
-  const need = [];
-  for (const tripId of tripIds) {
-    if (!tripId || tripStopsByTripId.has(tripId)) continue;
-    need.push(tripId);
-  }
-  if (need.length === 0) return;
+async function ensureTripStopSequencesFromZipScan(needTripIds) {
+  if (!Array.isArray(needTripIds) || needTripIds.length === 0) return;
   if (!activeZip) return;
 
-  const needSet = new Set(need);
+  const needSet = new Set(needTripIds);
   const rowsByTrip = new Map();
-  for (const tripId of need) rowsByTrip.set(tripId, []);
+  for (const tripId of needTripIds) rowsByTrip.set(tripId, []);
 
   await parseCSVFromZip(activeZip, "stop_times.txt", {
     stepRow: (row) => {
@@ -613,7 +713,7 @@ async function ensureTripStopSequencesForTripIds(tripIds) {
     },
   });
 
-  for (const tripId of need) {
+  for (const tripId of needTripIds) {
     const rows = rowsByTrip.get(tripId) || [];
     rows.sort((a, b) => a.seq - b.seq);
     const out = [];
@@ -626,6 +726,41 @@ async function ensureTripStopSequencesForTripIds(tripIds) {
     }
     tripStopsByTripId.set(tripId, out);
   }
+}
+
+async function ensureTripStopSequencesForTripIds(tripIds) {
+  const need = [];
+  for (const tripId of tripIds) {
+    if (!tripId || tripStopsByTripId.has(tripId)) continue;
+    need.push(tripId);
+  }
+  if (need.length === 0) return;
+  if (!activeZip) return;
+
+  const workerReady = await ensureStopOverlayWorkerIndex();
+  if (workerReady) {
+    try {
+      const msg = await requestStopOverlayWorker("get_trip_stops", { tripIds: need });
+      const byTrip = msg?.tripStopsByTripId || {};
+      for (const tripId of need) {
+        const seq = byTrip[tripId];
+        if (Array.isArray(seq)) {
+          tripStopsByTripId.set(tripId, seq.map((x) => String(x)));
+        } else {
+          tripStopsByTripId.set(tripId, []);
+        }
+      }
+      return;
+    } catch (err) {
+      console.warn("Stop overlay worker query failed; falling back to zip scan.", err);
+    }
+  }
+
+  const stillNeed = need.filter((tripId) => !tripStopsByTripId.has(tripId));
+  if (stillNeed.length === 0) return;
+
+  // Fallback for first click before worker index is ready.
+  await ensureTripStopSequencesFromZipScan(stillNeed);
 }
 
 function buildDownstreamStopMarkers(stopId, tripStopIds) {
@@ -667,6 +802,27 @@ async function getRouteStopMarkersBySegment(stop, segments) {
   const cacheKey = routeStopOverlayCacheKey(stop, segments);
   const cached = routeStopsOverlayCache.get(cacheKey);
   if (cached) return cached;
+
+  const preloadedByShape = preloadedStopOverlayByStop.get(String(stop.stop_id || ""));
+  if (preloadedByShape instanceof Map) {
+    const bySegmentKey = new Map();
+    for (const seg of segments) {
+      const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+      const stopIds = preloadedByShape.get(segKey) || [];
+      const markers = [];
+      for (const sid of stopIds) {
+        const stopRow = stopsById.get(String(sid));
+        if (!stopRow) continue;
+        const lat = safeParseFloat(stopRow.stop_lat);
+        const lon = safeParseFloat(stopRow.stop_lon);
+        if (lat == null || lon == null) continue;
+        markers.push({ stop_id: String(sid), lat, lon });
+      }
+      bySegmentKey.set(segKey, markers);
+    }
+    routeStopsOverlayCache.set(cacheKey, bySegmentKey);
+    return bySegmentKey;
+  }
 
   await ensureTripsLoadedForStopOverlay();
 
@@ -3728,6 +3884,7 @@ function loadRouteSummaryCacheFromData(preloadData) {
   if (!stopsObj || typeof stopsObj !== "object") return false;
 
   const nextCache = new Map();
+  const nextStopOverlays = new Map();
   const version = Number.parseInt(preloadData.version, 10) || 1;
   if (version >= 2) {
     const itemFields = Array.isArray(preloadData.item_fields)
@@ -3752,7 +3909,24 @@ function loadRouteSummaryCacheFromData(preloadData) {
   }
 
   if (nextCache.size === 0) return false;
+
+  const rawStopOverlays = preloadData.stop_overlays;
+  if (rawStopOverlays && typeof rawStopOverlays === "object") {
+    for (const [stopId, byRouteShape] of Object.entries(rawStopOverlays)) {
+      if (!stopId || !byRouteShape || typeof byRouteShape !== "object") continue;
+      const byShapeMap = new Map();
+      for (const [routeShapeKey, stopIds] of Object.entries(byRouteShape)) {
+        if (!routeShapeKey || !Array.isArray(stopIds)) continue;
+        byShapeMap.set(routeShapeKey, stopIds.map((sid) => String(sid)));
+      }
+      if (byShapeMap.size > 0) {
+        nextStopOverlays.set(String(stopId), byShapeMap);
+      }
+    }
+  }
+
   routeSummaryCache = nextCache;
+  preloadedStopOverlayByStop = nextStopOverlays;
   return true;
 }
 
@@ -4470,6 +4644,9 @@ ui.copyBtn.addEventListener("click", async () => {
 
 ui.showStopsToggle?.addEventListener("change", () => {
   showStopsOnSign = !!ui.showStopsToggle?.checked;
+  if (showStopsOnSign) {
+    void prewarmStopOverlayData(bootGeneration);
+  }
   rerenderSelectedStopSign();
 });
 
@@ -4528,6 +4705,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
   selectedStop = null;
   selectedStopRouteSummary = null;
   routeSummaryCache = new Map();
+  preloadedStopOverlayByStop = new Map();
   resetTripStopOverlayCaches();
   setUpdatesUi({ showButton: false, showStatus: false });
 
@@ -4630,6 +4808,9 @@ async function boot({ zipUrl, zipFile, zipName }) {
       } else {
         setUpdatesUi({ showButton: true, showStatus: false, buttonText: "Download Updated GTFS File", disableButton: false });
       }
+      setTimeout(() => {
+        void prewarmStopOverlayData(generationAtStart);
+      }, 0);
       console.log("Loaded with precomputed route summaries.");
       return;
     }
@@ -4737,6 +4918,9 @@ async function boot({ zipUrl, zipFile, zipName }) {
 
     setProgress(100, "Ready. Click a stop.");
     setUpdatesUi({ showButton: false, showStatus: true, statusText: "GTFS Uploaded" });
+    setTimeout(() => {
+      void prewarmStopOverlayData(generationAtStart);
+    }, 0);
     if (!workerLoaded && routeSummaryCache.size === 0) {
       setTimeout(() => {
         void preloadRouteSummariesInBackground(generationAtStart, stops.slice());
