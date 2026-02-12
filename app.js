@@ -2604,6 +2604,13 @@ function groupedRouteLineWidthForCount(groupCount) {
   return 5;
 }
 
+function stopMarkerStyleForLineWidth(lineWidthPx) {
+  const targetDiameter = Math.max(1, Number(lineWidthPx) || groupedRouteLineWidthForCount(1));
+  const strokeWidth = Math.max(0.35, Math.min(1.2, targetDiameter * 0.25));
+  const radius = Math.max(0.45, (targetDiameter - strokeWidth) / 2);
+  return { radius, strokeWidth };
+}
+
 function pointToSegmentDistanceSq(p, a, b) {
   const abx = b.x - a.x;
   const aby = b.y - a.y;
@@ -2700,6 +2707,7 @@ function buildSharedLanePlacementData(sharedChains, projectPointToPixel) {
     const meta = {
       centerPoints,
       groupedWidth,
+      laneStep,
       offsetByRouteId,
     };
     for (const rid of orderedRouteIds) {
@@ -2712,6 +2720,7 @@ function buildSharedLanePlacementData(sharedChains, projectPointToPixel) {
 }
 
 function markerPixelPositionOnRouteLane(seg, marker, projectPointToPixel, segPixelPointsCache, sharedLaneByRouteId) {
+  const defaultLaneWidthPx = groupedRouteLineWidthForCount(1);
   const defaultPx = projectPointToPixel(marker.lat, marker.lon);
   const p = { x: defaultPx[0], y: defaultPx[1] };
   const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
@@ -2730,7 +2739,7 @@ function markerPixelPositionOnRouteLane(seg, marker, projectPointToPixel, segPix
 
   const routeId = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
   const chainCandidates = sharedLaneByRouteId.get(routeId) || [];
-  if (!onSeg || chainCandidates.length === 0) return { x, y };
+  if (!onSeg || chainCandidates.length === 0) return { x, y, laneWidthPx: defaultLaneWidthPx };
 
   const anchor = { x, y };
   let best = null;
@@ -2740,16 +2749,17 @@ function markerPixelPositionOnRouteLane(seg, marker, projectPointToPixel, segPix
     if (!best || near.d2 < best.near.d2) best = { meta, near };
   }
 
-  if (!best) return { x, y };
+  if (!best) return { x, y, laneWidthPx: defaultLaneWidthPx };
 
   const sharedSnapPx = Math.max(10, best.meta.groupedWidth * 1.4);
   if (best.near.d2 > (sharedSnapPx * sharedSnapPx) || best.near.d2 > (onSeg.d2 + 25)) {
-    return { x, y };
+    return { x, y, laneWidthPx: defaultLaneWidthPx };
   }
 
+  const laneWidthPx = Number.isFinite(best.meta.laneStep) ? best.meta.laneStep : defaultLaneWidthPx;
   const off = best.meta.offsetByRouteId.get(routeId);
   if (!Number.isFinite(off) || Math.abs(off) < 1e-9 || best.near.segLen <= 1e-6) {
-    return { x: best.near.x, y: best.near.y };
+    return { x: best.near.x, y: best.near.y, laneWidthPx };
   }
 
   const nx = -best.near.dy / best.near.segLen;
@@ -2757,6 +2767,7 @@ function markerPixelPositionOnRouteLane(seg, marker, projectPointToPixel, segPix
   return {
     x: best.near.x + (nx * off),
     y: best.near.y + (ny * off),
+    laneWidthPx,
   };
 }
 
@@ -3493,7 +3504,6 @@ async function drawRoutePreviewOnCanvas(ctx, {
 
       ctx.fillStyle = seg.lineColor;
       ctx.strokeStyle = "rgba(255,255,255,0.95)";
-      ctx.lineWidth = 1.2;
       for (const s of stopsForSeg) {
         const pos = markerPixelPositionOnRouteLane(
           seg,
@@ -3502,10 +3512,12 @@ async function drawRoutePreviewOnCanvas(ctx, {
           segPixelPointsCache,
           sharedLaneByRouteId,
         );
+        const markerStyle = stopMarkerStyleForLineWidth(pos.laneWidthPx);
         const px = pos.x;
         const py = pos.y;
+        ctx.lineWidth = markerStyle.strokeWidth;
         ctx.beginPath();
-        ctx.arc(px, py, 2.8, 0, Math.PI * 2);
+        ctx.arc(px, py, markerStyle.radius, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       }
@@ -4103,9 +4115,10 @@ async function buildSignSvg({
           segPixelPointsCache,
           sharedLaneByRouteId,
         );
+        const markerStyle = stopMarkerStyleForLineWidth(pos.laneWidthPx);
         const px = pos.x;
         const py = pos.y;
-        routeStopsSvg.push(`<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="2.8" fill="${seg.lineColor}" stroke="#ffffff" stroke-width="1.2" />`);
+        routeStopsSvg.push(`<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="${markerStyle.radius.toFixed(2)}" fill="${seg.lineColor}" stroke="#ffffff" stroke-width="${markerStyle.strokeWidth.toFixed(2)}" />`);
       }
     }
   }
