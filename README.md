@@ -17,3 +17,4 @@ I heard that the largest reason for poor signage is due to the frequency of how 
 ## TODO
 
 - Mass download of bus signs for large areas.
+- Make lines look smoother when merging or splitting.
