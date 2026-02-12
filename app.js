@@ -33,6 +33,7 @@ const ui = {
   downloadBtn: el("downloadBtn"),
   copyBtn: el("copyBtn"),
   downloadSvgBtn: el("downloadSvgBtn"),
+  showStopsToggle: el("showStopsToggle"),
   signWrap: el("signWrap"),
   signCanvas: el("signCanvas"),
 };
@@ -42,6 +43,7 @@ let markerCluster;
 
 // GTFS data stores
 let stops = [];          // [{stop_id, stop_name, stop_lat, stop_lon, stop_code?}]
+let stopsById = new Map(); // stop_id -> stop row
 let routesById = new Map(); // route_id -> {route_short_name, route_long_name, route_color, route_text_color}
 let tripsById = new Map();  // trip_id -> {route_id, direction_id, trip_headsign, shape_id, service_id}
 let stopToTrips = new Map();// stop_id -> Set(trip_id)
@@ -57,10 +59,18 @@ let selectedStopRouteSummary = null;
 let signRenderToken = 0;
 const tileImageCache = new Map();
 let routeSummaryCache = new Map(); // `${stop_id}::${direction}` -> summary array
+let showStopsOnSign = false;
+let activeZip = null;
 let bootGeneration = 0;
 let feedUpdatedDateLabel = "";
 let feedUpdatedDateKey = null;
 let usingPreloadedSummaries = false;
+let tripIndexReady = false;
+let candidateTripsByRouteShapeDirectionHeadsign = new Map();
+let candidateTripsByRouteShapeDirection = new Map();
+let candidateTripsByRouteShape = new Map();
+let tripStopsByTripId = new Map(); // trip_id -> [stop_id... in stop_sequence order]
+let routeStopsOverlayCache = new Map(); // stop_id + segment signature -> Map(route_shape_key -> marker[])
 
 const MAP_LINE_PALETTE = [
   "#e63946", "#1d3557", "#2a9d8f", "#f4a261", "#6a4c93",
@@ -77,6 +87,10 @@ const SIGN_VECTOR_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-styl
 const SIGN_VECTOR_ROAD_LABEL_SIZE_SCALE = 10;
 const SIGN_VECTOR_ROAD_LABEL_DENSITY_SCALE = 0.1;
 const SIGN_VECTOR_ROAD_LABEL_MINZOOM_SHIFT = -10;
+const SIGN_VECTOR_ROAD_LABEL_REFERENCE_ZOOM = 16.6;
+const SIGN_VECTOR_ROAD_LABEL_ZOOM_COMPENSATION = 1;
+const SIGN_VECTOR_ROAD_LABEL_MIN_FACTOR = 0.55;
+const SIGN_VECTOR_ROAD_LABEL_MAX_FACTOR = 1.45;
 const SIGN_VECTOR_ROAD_LABEL_COLOR = "#4b5563";
 const SIGN_VECTOR_ROAD_LABEL_HALO_COLOR = "#ffffff";
 const SIGN_VECTOR_ROAD_LABEL_HALO_WIDTH = 1.2;
@@ -92,6 +106,7 @@ const SIGN_ROUTE_LINE_WIDTH_RULES = [
 ];
 const SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX = 0;
 const SIGN_ROUTE_GROUP_LANE_OVERLAP_PX = 0.45;
+const STOP_OVERLAY_TRIP_CANDIDATE_LIMIT = 24;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
@@ -108,6 +123,8 @@ let signVectorStylePromise = null;
 let signVectorMapHost = null;
 let signVectorMap = null;
 let signVectorUnavailable = false;
+let signVectorRoadLabelBaseSizeByLayer = new Map();
+let signVectorRoadLabelLastFactor = null;
 
 function applyPreviewZoom() {
   if (!ui.signCanvas) return;
@@ -482,6 +499,249 @@ function parseCSVText(text, { stepRow, complete } = {}) {
   });
 }
 
+function resetTripStopOverlayCaches() {
+  tripIndexReady = false;
+  candidateTripsByRouteShapeDirectionHeadsign = new Map();
+  candidateTripsByRouteShapeDirection = new Map();
+  candidateTripsByRouteShape = new Map();
+  tripStopsByTripId = new Map();
+  routeStopsOverlayCache = new Map();
+}
+
+function normalizeHeadsignKey(v) {
+  return String(v ?? "").trim().toLowerCase();
+}
+
+function routeShapeDirectionKey(routeId, shapeId, directionId) {
+  return `${routeId || ""}::${shapeId || ""}::${directionId || ""}`;
+}
+
+function routeShapeKeyOnly(routeId, shapeId) {
+  return `${routeId || ""}::${shapeId || ""}`;
+}
+
+function routeShapeDirectionHeadsignKey(routeId, shapeId, directionId, headsign) {
+  return `${routeShapeDirectionKey(routeId, shapeId, directionId)}::${normalizeHeadsignKey(headsign)}`;
+}
+
+function addTripCandidate(mapObj, key, tripId) {
+  if (!key || !tripId) return;
+  let arr = mapObj.get(key);
+  if (!arr) {
+    arr = [];
+    mapObj.set(key, arr);
+  }
+  if (arr.includes(tripId)) return;
+  arr.push(tripId);
+}
+
+function ensureTripIndex() {
+  if (tripIndexReady) return;
+
+  candidateTripsByRouteShapeDirectionHeadsign = new Map();
+  candidateTripsByRouteShapeDirection = new Map();
+  candidateTripsByRouteShape = new Map();
+
+  for (const [tripId, trip] of tripsById.entries()) {
+    const routeId = String(trip?.route_id || "").trim();
+    const shapeId = String(trip?.shape_id || "").trim();
+    if (!routeId || !shapeId) continue;
+    const directionId = String(trip?.direction_id ?? "").trim();
+    const headsign = String(trip?.trip_headsign ?? "").trim();
+
+    addTripCandidate(
+      candidateTripsByRouteShapeDirectionHeadsign,
+      routeShapeDirectionHeadsignKey(routeId, shapeId, directionId, headsign),
+      tripId,
+    );
+    addTripCandidate(
+      candidateTripsByRouteShapeDirection,
+      routeShapeDirectionKey(routeId, shapeId, directionId),
+      tripId,
+    );
+    addTripCandidate(
+      candidateTripsByRouteShape,
+      routeShapeKeyOnly(routeId, shapeId),
+      tripId,
+    );
+  }
+
+  tripIndexReady = true;
+}
+
+async function ensureTripsLoadedForStopOverlay() {
+  if (tripsById.size > 0) return;
+  if (!activeZip) return;
+  const trips = await parseCSVFromZip(activeZip, "trips.txt");
+  for (const t of trips) {
+    if (!t?.trip_id) continue;
+    tripsById.set(t.trip_id, {
+      route_id: t.route_id,
+      direction_id: (t.direction_id ?? "").toString(),
+      trip_headsign: t.trip_headsign ?? "",
+      shape_id: (t.shape_id ?? "").toString(),
+      service_id: (t.service_id ?? "").toString(),
+    });
+  }
+  tripIndexReady = false;
+}
+
+function tripCandidateIdsForSegment(seg) {
+  ensureTripIndex();
+  const routeId = String(seg?.route_id || "").trim();
+  const shapeId = String(seg?.shape_id || "").trim();
+  if (!routeId || !shapeId) return [];
+  const directionId = String(seg?.direction_id ?? "").trim();
+  const headsign = String(seg?.headsign ?? "").trim();
+
+  const keys = [
+    routeShapeDirectionHeadsignKey(routeId, shapeId, directionId, headsign),
+    routeShapeDirectionKey(routeId, shapeId, directionId),
+    routeShapeKeyOnly(routeId, shapeId),
+  ];
+  const pools = [
+    candidateTripsByRouteShapeDirectionHeadsign,
+    candidateTripsByRouteShapeDirection,
+    candidateTripsByRouteShape,
+  ];
+
+  const seen = new Set();
+  const out = [];
+  for (let i = 0; i < keys.length; i += 1) {
+    const arr = pools[i].get(keys[i]) || [];
+    for (const tripId of arr) {
+      if (seen.has(tripId)) continue;
+      seen.add(tripId);
+      out.push(tripId);
+      if (out.length >= STOP_OVERLAY_TRIP_CANDIDATE_LIMIT) return out;
+    }
+  }
+  return out;
+}
+
+async function ensureTripStopSequencesForTripIds(tripIds) {
+  const need = [];
+  for (const tripId of tripIds) {
+    if (!tripId || tripStopsByTripId.has(tripId)) continue;
+    need.push(tripId);
+  }
+  if (need.length === 0) return;
+  if (!activeZip) return;
+
+  const needSet = new Set(need);
+  const rowsByTrip = new Map();
+  for (const tripId of need) rowsByTrip.set(tripId, []);
+
+  await parseCSVFromZip(activeZip, "stop_times.txt", {
+    stepRow: (row) => {
+      const tripId = row?.trip_id;
+      if (!tripId || !needSet.has(tripId)) return;
+      const stopId = row?.stop_id;
+      if (!stopId) return;
+      const seq = Number.parseInt(row?.stop_sequence, 10);
+      const arr = rowsByTrip.get(tripId);
+      arr.push({
+        stop_id: String(stopId),
+        seq: Number.isFinite(seq) ? seq : arr.length,
+      });
+    },
+  });
+
+  for (const tripId of need) {
+    const rows = rowsByTrip.get(tripId) || [];
+    rows.sort((a, b) => a.seq - b.seq);
+    const out = [];
+    let lastKey = "";
+    for (const row of rows) {
+      const key = `${row.seq}::${row.stop_id}`;
+      if (key === lastKey) continue;
+      lastKey = key;
+      out.push(row.stop_id);
+    }
+    tripStopsByTripId.set(tripId, out);
+  }
+}
+
+function buildDownstreamStopMarkers(stopId, tripStopIds) {
+  if (!stopId || !Array.isArray(tripStopIds) || tripStopIds.length === 0) return [];
+  const idx = tripStopIds.indexOf(String(stopId));
+  if (idx < 0) return [];
+
+  const out = [];
+  const seen = new Set();
+  for (let i = idx + 1; i < tripStopIds.length; i += 1) {
+    const sid = tripStopIds[i];
+    if (!sid || sid === stopId || seen.has(sid)) continue;
+    seen.add(sid);
+    const stop = stopsById.get(sid);
+    if (!stop) continue;
+    const lat = safeParseFloat(stop.stop_lat);
+    const lon = safeParseFloat(stop.stop_lon);
+    if (lat == null || lon == null) continue;
+    out.push({
+      stop_id: sid,
+      lat,
+      lon,
+    });
+  }
+  return out;
+}
+
+function routeStopOverlayCacheKey(stop, segments) {
+  const stopId = String(stop?.stop_id || "");
+  const sig = (segments || [])
+    .map((seg) => `${seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`}::${seg.direction_id ?? ""}`)
+    .join("|");
+  return `${stopId}::${sig}`;
+}
+
+async function getRouteStopMarkersBySegment(stop, segments) {
+  if (!stop || !Array.isArray(segments) || segments.length === 0) return new Map();
+
+  const cacheKey = routeStopOverlayCacheKey(stop, segments);
+  const cached = routeStopsOverlayCache.get(cacheKey);
+  if (cached) return cached;
+
+  await ensureTripsLoadedForStopOverlay();
+
+  const candidateTripIdsBySegmentKey = new Map();
+  const allTripIds = [];
+  for (const seg of segments) {
+    const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+    const tripIds = tripCandidateIdsForSegment(seg);
+    candidateTripIdsBySegmentKey.set(segKey, tripIds);
+    for (const tripId of tripIds) allTripIds.push(tripId);
+  }
+
+  await ensureTripStopSequencesForTripIds(allTripIds);
+
+  const bySegmentKey = new Map();
+  const stopId = String(stop.stop_id || "");
+  for (const seg of segments) {
+    const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+    const candidates = candidateTripIdsBySegmentKey.get(segKey) || [];
+    let bestStops = [];
+    let bestDownstreamCount = -1;
+
+    for (const tripId of candidates) {
+      const tripStops = tripStopsByTripId.get(tripId) || [];
+      const idx = tripStops.indexOf(stopId);
+      if (idx < 0) continue;
+      const downstreamCount = tripStops.length - idx - 1;
+      if (downstreamCount > bestDownstreamCount) {
+        bestStops = tripStops;
+        bestDownstreamCount = downstreamCount;
+      }
+    }
+
+    const markers = buildDownstreamStopMarkers(stopId, bestStops);
+    bySegmentKey.set(segKey, markers);
+  }
+
+  routeStopsOverlayCache.set(cacheKey, bySegmentKey);
+  return bySegmentKey;
+}
+
 async function loadZipFromUrl(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
@@ -655,6 +915,7 @@ function buildRouteSegmentsForStop(stop, items, maxRoutes) {
     segments.push({
       route_id: it.route_id,
       overlap_route_id: routeShapeKey,
+      direction_id: (it.direction_id ?? "").toString(),
       route_short_name: short,
       headsign,
       display_name: displayName,
@@ -2709,6 +2970,9 @@ async function loadSignVectorStyle() {
     const style = deepCloneJson(baseStyle);
     if (!Array.isArray(style.layers)) return style;
 
+    signVectorRoadLabelBaseSizeByLayer = new Map();
+    signVectorRoadLabelLastFactor = null;
+
     for (const layer of style.layers) {
       if (!layer || layer.type !== "symbol") continue;
       const layout = layer.layout || {};
@@ -2740,6 +3004,10 @@ async function loadSignVectorStyle() {
           "text-halo-color": SIGN_VECTOR_ROAD_LABEL_HALO_COLOR,
           "text-halo-width": SIGN_VECTOR_ROAD_LABEL_HALO_WIDTH,
         };
+
+        if (layer.id) {
+          signVectorRoadLabelBaseSizeByLayer.set(layer.id, deepCloneJson(scaledTextSize));
+        }
       }
 
       layer.layout = nextLayout;
@@ -2751,6 +3019,31 @@ async function loadSignVectorStyle() {
     return style;
   })();
   return signVectorStylePromise;
+}
+
+function roadLabelZoomCompensationFactor(renderZoom) {
+  if (!Number.isFinite(renderZoom)) return 1;
+  const raw = 2 ** ((SIGN_VECTOR_ROAD_LABEL_REFERENCE_ZOOM - renderZoom) * SIGN_VECTOR_ROAD_LABEL_ZOOM_COMPENSATION);
+  return Math.max(
+    SIGN_VECTOR_ROAD_LABEL_MIN_FACTOR,
+    Math.min(SIGN_VECTOR_ROAD_LABEL_MAX_FACTOR, raw),
+  );
+}
+
+function applyRoadLabelZoomCompensation(mapObj, renderZoom) {
+  if (!mapObj || signVectorRoadLabelBaseSizeByLayer.size === 0) return 1;
+  const factor = roadLabelZoomCompensationFactor(renderZoom);
+  if (Number.isFinite(signVectorRoadLabelLastFactor) && Math.abs(signVectorRoadLabelLastFactor - factor) < 1e-3) {
+    return factor;
+  }
+
+  for (const [layerId, baseTextSize] of signVectorRoadLabelBaseSizeByLayer.entries()) {
+    if (!mapObj.getLayer(layerId)) continue;
+    mapObj.setLayoutProperty(layerId, "text-size", scaleTextSizeSpec(baseTextSize, factor));
+  }
+
+  signVectorRoadLabelLastFactor = factor;
+  return factor;
 }
 
 function ensureSignVectorMapHost(width, height) {
@@ -2826,6 +3119,7 @@ async function renderVectorBasemapSnapshot({ bounds, width, height }) {
     if (!mapObj) return null;
 
     const view = computeSignMapViewWindow(bounds, width, height, 0);
+    const roadLabelZoomFactor = applyRoadLabelZoomCompensation(mapObj, view.renderZoom);
     const glZoom = Math.max(0, view.renderZoom + SIGN_VECTOR_GL_ZOOM_OFFSET);
     mapObj.resize();
     mapObj.jumpTo({
@@ -2844,7 +3138,7 @@ async function renderVectorBasemapSnapshot({ bounds, width, height }) {
     snapshot.height = src.height;
     const sctx = snapshot.getContext("2d");
     sctx.drawImage(src, 0, 0);
-    return { canvas: snapshot, view };
+    return { canvas: snapshot, view, roadLabelZoomFactor };
   } catch (err) {
     console.warn("Vector sign basemap unavailable, using raster fallback.", err);
     signVectorUnavailable = true;
@@ -2966,7 +3260,9 @@ function makeCanvasProjector(bounds, drawX, drawY, drawW, drawH) {
   return { project };
 }
 
-async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, renderToken }) {
+async function drawRoutePreviewOnCanvas(ctx, {
+  x, y, w, h, stop, segments, renderToken, showStops = false, routeStopMarkersBySegment = null,
+}) {
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
 
@@ -3041,6 +3337,25 @@ async function drawRoutePreviewOnCanvas(ctx, { x, y, w, h, stop, segments, rende
       roundCapStart: !!chain.roundCapStart,
       roundCapEnd: !!chain.roundCapEnd,
     });
+  }
+
+  if (showStops && routeStopMarkersBySegment instanceof Map) {
+    for (const seg of segments) {
+      const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+      const stopsForSeg = routeStopMarkersBySegment.get(segKey) || [];
+      if (!stopsForSeg.length) continue;
+
+      ctx.fillStyle = seg.lineColor;
+      ctx.strokeStyle = "rgba(255,255,255,0.95)";
+      ctx.lineWidth = 1.2;
+      for (const s of stopsForSeg) {
+        const [px, py] = project(s.lat, s.lon);
+        ctx.beginPath();
+        ctx.arc(px, py, 2.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
   }
 
   if (stopLat != null && stopLon != null) {
@@ -3363,7 +3678,15 @@ async function preloadRouteSummariesInBackground(generationAtStart, stopsList) {
   }
 }
 
-async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken, outputScale = 1 }) {
+async function drawSign({
+  stop,
+  items,
+  directionFilter,
+  maxRoutes,
+  renderToken,
+  outputScale = 1,
+  showStops = false,
+}) {
   const canvas = ui.signCanvas;
   const ctx = canvas.getContext("2d");
 
@@ -3414,6 +3737,16 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken, 
   ctx.fillText(subtitle, pad, headerH);
 
   const routeSegments = buildRouteSegmentsForStop(stop, items, maxRoutes);
+  let routeStopMarkersBySegment = null;
+  if (showStops) {
+    try {
+      routeStopMarkersBySegment = await getRouteStopMarkersBySegment(stop, routeSegments);
+    } catch (err) {
+      console.warn("Failed to load route stop markers for sign preview.", err);
+      routeStopMarkersBySegment = null;
+    }
+    if (renderToken !== signRenderToken) return;
+  }
 
   // Route map preview (this is rendered into the PNG)
   const mapTop = headerH + 30;
@@ -3431,6 +3764,8 @@ async function drawSign({ stop, items, directionFilter, maxRoutes, renderToken, 
     stop,
     segments: routeSegments,
     renderToken,
+    showStops,
+    routeStopMarkersBySegment,
   });
 
   if (renderToken !== signRenderToken) return;
@@ -3450,7 +3785,14 @@ function escXml(s) {
     .replaceAll("'", "&apos;");
 }
 
-async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale = 1 }) {
+async function buildSignSvg({
+  stop,
+  items,
+  directionFilter,
+  maxRoutes,
+  outputScale = 1,
+  showStops = false,
+}) {
   const exportScale = Math.max(1, Math.min(3, Number(outputScale) || 1));
   const svgOutW = Math.round(900 * exportScale);
   const svgOutH = Math.round(1200 * exportScale);
@@ -3464,6 +3806,15 @@ async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputSca
   const footerY = H - 40;
 
   const routeSegments = buildRouteSegmentsForStop(stop, items, maxRoutes);
+  let routeStopMarkersBySegment = null;
+  if (showStops) {
+    try {
+      routeStopMarkersBySegment = await getRouteStopMarkersBySegment(stop, routeSegments);
+    } catch (err) {
+      console.warn("Failed to load route stop markers for SVG export.", err);
+      routeStopMarkersBySegment = null;
+    }
+  }
   const legendH = Math.min(220, estimateLegendHeight(routeSegments, 6));
   const mapHeight = Math.max(220, (footerY - mapY) - 18);
   const bounds = getRouteBounds(stop, routeSegments);
@@ -3579,6 +3930,19 @@ async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputSca
     }
   }
 
+  const routeStopsSvg = [];
+  if (showStops && routeStopMarkersBySegment instanceof Map) {
+    for (const seg of routeSegments) {
+      const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+      const stopsForSeg = routeStopMarkersBySegment.get(segKey) || [];
+      if (!stopsForSeg.length) continue;
+      for (const s of stopsForSeg) {
+        const [px, py] = project(s.lat, s.lon);
+        routeStopsSvg.push(`<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="2.8" fill="${seg.lineColor}" stroke="#ffffff" stroke-width="1.2" />`);
+      }
+    }
+  }
+
   const legendSvg = [];
   const legendX = mapOuterX + 14;
   const lineH = 16;
@@ -3627,6 +3991,7 @@ async function buildSignSvg({ stop, items, directionFilter, maxRoutes, outputSca
   </g>
   ${routePathSvg.join("")}
   ${sharedLaneSvg.join("")}
+  ${routeStopsSvg.join("")}
   ${stopPt ? `<circle cx="${stopPt[0].toFixed(2)}" cy="${stopPt[1].toFixed(2)}" r="6" fill="#ffffff" stroke="#111111" stroke-width="2" />` : ""}
   ${legendSvg.join("")}
   <text x="${pad}" y="${H - 40}" fill="#888888" font-size="16" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(signFooterText())}</text>
@@ -3646,15 +4011,34 @@ function roundRect(ctx, x, y, w, h, r, fill, stroke) {
   if (stroke) ctx.stroke();
 }
 
+function rerenderSelectedStopSign() {
+  const stop = selectedStop;
+  if (!stop) return;
+  const directionFilter = FIXED_DIRECTION_FILTER;
+  const items = selectedStopRouteSummary || getRouteSummaryForStop(stop, directionFilter);
+  selectedStopRouteSummary = items;
+  const maxRoutes = items.length;
+  const renderToken = ++signRenderToken;
+  drawSign({
+    stop,
+    items,
+    directionFilter,
+    maxRoutes,
+    renderToken,
+    outputScale: FIXED_EXPORT_SCALE,
+    showStops: showStopsOnSign,
+  }).catch((err) => console.error("Sign render failed", err));
+}
+
 function openStop(stop) {
   selectedStop = stop;
   resetPreviewZoom();
+  if (ui.showStopsToggle) ui.showStopsToggle.checked = !!showStopsOnSign;
 
   ui.modalTitle.textContent = stop.stop_name || "Bus Stop";
   ui.modalSubtitle.textContent = stop.stop_code ? `Stop #${stop.stop_code}` : `Stop ID: ${stop.stop_id}`;
 
   const directionFilter = FIXED_DIRECTION_FILTER;
-  const renderToken = ++signRenderToken;
 
   openModal();
   selectedStopRouteSummary = getRouteSummaryForStop(stop, directionFilter);
@@ -3715,6 +4099,9 @@ function openStop(stop) {
       vector_road_label_size_scale: SIGN_VECTOR_ROAD_LABEL_SIZE_SCALE,
       vector_road_label_density_scale: SIGN_VECTOR_ROAD_LABEL_DENSITY_SCALE,
       vector_road_label_minzoom_shift: SIGN_VECTOR_ROAD_LABEL_MINZOOM_SHIFT,
+      vector_road_label_reference_zoom: SIGN_VECTOR_ROAD_LABEL_REFERENCE_ZOOM,
+      vector_road_label_zoom_compensation: SIGN_VECTOR_ROAD_LABEL_ZOOM_COMPENSATION,
+      vector_road_label_zoom_factor: roadLabelZoomCompensationFactor(signMapView.renderZoom),
       vector_road_label_color: SIGN_VECTOR_ROAD_LABEL_COLOR,
       vector_gl_zoom_offset: SIGN_VECTOR_GL_ZOOM_OFFSET,
       vector_basemap_opacity: SIGN_BASEMAP_OPACITY,
@@ -3737,16 +4124,10 @@ function openStop(stop) {
       lat: signMapView.centerLat,
       lon: signMapView.centerLon,
     },
+    show_stops: showStopsOnSign,
   });
 
-  drawSign({
-    stop,
-    items: selectedStopRouteSummary,
-    directionFilter,
-    maxRoutes,
-    renderToken,
-    outputScale: FIXED_EXPORT_SCALE,
-  }).catch((err) => console.error("Sign render failed", err));
+  rerenderSelectedStopSign();
 }
 
 ui.downloadBtn.addEventListener("click", async () => {
@@ -3771,6 +4152,7 @@ ui.downloadBtn.addEventListener("click", async () => {
       maxRoutes,
       renderToken,
       outputScale,
+      showStops: showStopsOnSign,
     });
     if (renderToken !== signRenderToken) return;
 
@@ -3794,7 +4176,14 @@ ui.downloadSvgBtn.addEventListener("click", async () => {
   const items = getRouteSummaryForStop(stop, directionFilter);
   let svg = "";
   try {
-    svg = await buildSignSvg({ stop, items, directionFilter, maxRoutes, outputScale });
+    svg = await buildSignSvg({
+      stop,
+      items,
+      directionFilter,
+      maxRoutes,
+      outputScale,
+      showStops: showStopsOnSign,
+    });
   } catch (err) {
     console.error(err);
     alert("Failed to export SVG. Try again in a moment.");
@@ -3841,6 +4230,11 @@ ui.copyBtn.addEventListener("click", async () => {
   }
 });
 
+ui.showStopsToggle?.addEventListener("change", () => {
+  showStopsOnSign = !!ui.showStopsToggle?.checked;
+  rerenderSelectedStopSign();
+});
+
 ui.reloadBtn.addEventListener("click", async () => {
   if (!usingPreloadedSummaries) return;
   const feedDateIso = dateKeyToIsoDate(feedUpdatedDateKey);
@@ -3878,7 +4272,9 @@ async function boot({ zipUrl, zipFile, zipName }) {
   ui.zipName.textContent = zipName;
 
   // Clear previous data
+  activeZip = null;
   stops = [];
+  stopsById = new Map();
   routesById = new Map();
   tripsById = new Map();
   stopToTrips = new Map();
@@ -3894,16 +4290,23 @@ async function boot({ zipUrl, zipFile, zipName }) {
   selectedStop = null;
   selectedStopRouteSummary = null;
   routeSummaryCache = new Map();
+  resetTripStopOverlayCaches();
   setUpdatesUi({ showButton: false, showStatus: false });
 
   try {
     const zip = zipFile ? await loadZipFromFile(zipFile) : await loadZipFromUrl(zipUrl);
+    activeZip = zip;
     const canUsePreloadedSummaries = !zipFile && zipName === "google_transit.zip";
     const preloadPromise = canUsePreloadedSummaries ? tryLoadPreloadedRouteSummaries() : Promise.resolve(false);
 
     // 1) stops.txt (small-ish)
     setProgress(10, "Parsing stops.txt…");
     stops = await parseCSVFromZip(zip, "stops.txt");
+    stopsById = new Map();
+    for (const s of stops) {
+      if (!s?.stop_id) continue;
+      stopsById.set(String(s.stop_id), s);
+    }
     ui.stopsCount.textContent = niceInt(stops.length);
     if (generationAtStart !== bootGeneration) return;
 

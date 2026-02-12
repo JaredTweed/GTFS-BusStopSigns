@@ -43,6 +43,20 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
   padding: 12px 14px; border-bottom: 1px solid #eee;
   display:flex; align-items:flex-end; gap: 12px; flex-wrap: wrap;
 }
+.toggleCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #333;
+  user-select: none;
+}
+.toggleCheck input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
 .field { display:flex; flex-direction: column; gap: 6px; }
 .field__label { font-size: 12px; color:#666; font-weight: 700; }
 .input { border:1px solid #ddd; border-radius: 10px; padding: 8px 10px; font-weight: 600; }
