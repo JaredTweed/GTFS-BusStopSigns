@@ -2619,6 +2619,147 @@ function pointToSegmentDistanceSq(p, a, b) {
   return (dx * dx) + (dy * dy);
 }
 
+function closestPointOnSegment(p, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const denom = (dx * dx) + (dy * dy);
+  if (denom <= 1e-9) {
+    const dpx = p.x - a.x;
+    const dpy = p.y - a.y;
+    return {
+      x: a.x,
+      y: a.y,
+      t: 0,
+      d2: (dpx * dpx) + (dpy * dpy),
+      dx,
+      dy,
+      segLen: 0,
+    };
+  }
+  const t = Math.max(0, Math.min(1, (((p.x - a.x) * dx) + ((p.y - a.y) * dy)) / denom));
+  const qx = a.x + (dx * t);
+  const qy = a.y + (dy * t);
+  const ex = p.x - qx;
+  const ey = p.y - qy;
+  return {
+    x: qx,
+    y: qy,
+    t,
+    d2: (ex * ex) + (ey * ey),
+    dx,
+    dy,
+    segLen: Math.hypot(dx, dy),
+  };
+}
+
+function closestPointOnPolyline(pixelPoints, p) {
+  if (!Array.isArray(pixelPoints) || pixelPoints.length < 2 || !p) return null;
+  let best = null;
+  for (let i = 1; i < pixelPoints.length; i += 1) {
+    const a = pixelPoints[i - 1];
+    const b = pixelPoints[i];
+    const cand = closestPointOnSegment(p, a, b);
+    if (!best || cand.d2 < best.d2) {
+      best = {
+        ...cand,
+        segIdx: i - 1,
+      };
+    }
+  }
+  return best;
+}
+
+function buildSharedLanePlacementData(sharedChains, projectPointToPixel) {
+  const byRouteId = new Map();
+  if (!Array.isArray(sharedChains) || typeof projectPointToPixel !== "function") return byRouteId;
+
+  for (const chain of sharedChains) {
+    const orderedRouteIds = Array.isArray(chain?.orderedRouteIds) ? chain.orderedRouteIds : [];
+    if (orderedRouteIds.length < 2 || !Array.isArray(chain?.points) || chain.points.length < 2) continue;
+
+    const pixelPointsRaw = chain.points.map(([lat, lon]) => {
+      const px = projectPointToPixel(lat, lon);
+      return { x: px[0], y: px[1] };
+    });
+    let centerPoints = compactPixelPolyline(pixelPointsRaw);
+    if (SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX > 0) {
+      centerPoints = simplifyPixelPolyline(centerPoints, SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX);
+    }
+    if (centerPoints.length < 2) continue;
+
+    const groupCount = orderedRouteIds.length;
+    const groupedWidth = groupedRouteLineWidthForCount(groupCount);
+    const laneStep = Math.max(2, groupedWidth / groupCount);
+    const offsetByRouteId = new Map();
+    for (let i = 0; i < orderedRouteIds.length; i += 1) {
+      const rid = orderedRouteIds[i];
+      const off = ((i - ((groupCount - 1) / 2)) * laneStep);
+      offsetByRouteId.set(rid, off);
+    }
+
+    const meta = {
+      centerPoints,
+      groupedWidth,
+      offsetByRouteId,
+    };
+    for (const rid of orderedRouteIds) {
+      if (!byRouteId.has(rid)) byRouteId.set(rid, []);
+      byRouteId.get(rid).push(meta);
+    }
+  }
+
+  return byRouteId;
+}
+
+function markerPixelPositionOnRouteLane(seg, marker, projectPointToPixel, segPixelPointsCache, sharedLaneByRouteId) {
+  const defaultPx = projectPointToPixel(marker.lat, marker.lon);
+  const p = { x: defaultPx[0], y: defaultPx[1] };
+  const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+  let segPixelPoints = segPixelPointsCache.get(segKey);
+  if (!segPixelPoints) {
+    segPixelPoints = seg.points.map(([lat, lon]) => {
+      const px = projectPointToPixel(lat, lon);
+      return { x: px[0], y: px[1] };
+    });
+    segPixelPointsCache.set(segKey, segPixelPoints);
+  }
+
+  const onSeg = closestPointOnPolyline(segPixelPoints, p);
+  let x = onSeg ? onSeg.x : p.x;
+  let y = onSeg ? onSeg.y : p.y;
+
+  const routeId = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+  const chainCandidates = sharedLaneByRouteId.get(routeId) || [];
+  if (!onSeg || chainCandidates.length === 0) return { x, y };
+
+  const anchor = { x, y };
+  let best = null;
+  for (const meta of chainCandidates) {
+    const near = closestPointOnPolyline(meta.centerPoints, anchor);
+    if (!near) continue;
+    if (!best || near.d2 < best.near.d2) best = { meta, near };
+  }
+
+  if (!best) return { x, y };
+
+  const sharedSnapPx = Math.max(10, best.meta.groupedWidth * 1.4);
+  if (best.near.d2 > (sharedSnapPx * sharedSnapPx) || best.near.d2 > (onSeg.d2 + 25)) {
+    return { x, y };
+  }
+
+  const off = best.meta.offsetByRouteId.get(routeId);
+  if (!Number.isFinite(off) || Math.abs(off) < 1e-9 || best.near.segLen <= 1e-6) {
+    return { x: best.near.x, y: best.near.y };
+  }
+
+  const nx = -best.near.dy / best.near.segLen;
+  const ny = best.near.dx / best.near.segLen;
+  return {
+    x: best.near.x + (nx * off),
+    y: best.near.y + (ny * off),
+  };
+}
+
 function simplifyPixelPolyline(pixelPoints, tolerancePx = 0) {
   if (!Array.isArray(pixelPoints) || pixelPoints.length < 3) {
     return Array.isArray(pixelPoints) ? pixelPoints.slice() : [];
@@ -3299,7 +3440,12 @@ async function drawRoutePreviewOnCanvas(ctx, {
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
   const sharedEdges = buildSharedEdges(segments, stop);
   const sharedChains = buildSharedLaneChains(sharedEdges);
+  const sharedLaneByRouteId = buildSharedLanePlacementData(
+    sharedChains,
+    (lat, lon) => project(lat, lon),
+  );
   const sharedEdgeKeySet = new Set(sharedEdges.map((e) => e.key));
+  const segPixelPointsCache = new Map();
 
   for (const seg of segments) {
     const runs = buildNonSharedRuns(seg.points, sharedEdgeKeySet);
@@ -3349,7 +3495,15 @@ async function drawRoutePreviewOnCanvas(ctx, {
       ctx.strokeStyle = "rgba(255,255,255,0.95)";
       ctx.lineWidth = 1.2;
       for (const s of stopsForSeg) {
-        const [px, py] = project(s.lat, s.lon);
+        const pos = markerPixelPositionOnRouteLane(
+          seg,
+          s,
+          (lat, lon) => project(lat, lon),
+          segPixelPointsCache,
+          sharedLaneByRouteId,
+        );
+        const px = pos.x;
+        const py = pos.y;
         ctx.beginPath();
         ctx.arc(px, py, 2.8, 0, Math.PI * 2);
         ctx.fill();
@@ -3833,6 +3987,11 @@ async function buildSignSvg({
   const drawW = mapOuterW - (mapInnerPad * 2);
   const drawH = mapOuterH - (mapInnerPad * 2) - legendHForMap;
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
+  const sharedLaneByRouteId = buildSharedLanePlacementData(
+    sharedChains,
+    (lat, lon) => project(lat, lon),
+  );
+  const segPixelPointsCache = new Map();
 
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
@@ -3937,7 +4096,15 @@ async function buildSignSvg({
       const stopsForSeg = routeStopMarkersBySegment.get(segKey) || [];
       if (!stopsForSeg.length) continue;
       for (const s of stopsForSeg) {
-        const [px, py] = project(s.lat, s.lon);
+        const pos = markerPixelPositionOnRouteLane(
+          seg,
+          s,
+          (lat, lon) => project(lat, lon),
+          segPixelPointsCache,
+          sharedLaneByRouteId,
+        );
+        const px = pos.x;
+        const py = pos.y;
         routeStopsSvg.push(`<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="2.8" fill="${seg.lineColor}" stroke="#ffffff" stroke-width="1.2" />`);
       }
     }
