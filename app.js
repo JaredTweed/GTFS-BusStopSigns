@@ -50,8 +50,7 @@ let tripsById = new Map();  // trip_id -> {route_id, direction_id, trip_headsign
 let stopToTrips = new Map();// stop_id -> Set(trip_id)
 let stopTripTimes = new Map();// stop_id -> Map(trip_id -> departure seconds)
 let shapesById = new Map(); // shape_id -> [[lat, lon], ...]
-let serviceActiveDatesLastWeekById = new Map(); // service_id -> Set(YYYYMMDD number)
-let lastWeekWeekdayByDateKey = new Map(); // YYYYMMDD number -> weekday index (0=Sun..6=Sat)
+let serviceActiveWeekdaysById = new Map(); // service_id -> Set(weekday index, 0=Sun..6=Sat)
 let hasServiceCalendarData = false;
 
 // Selected stop
@@ -118,6 +117,7 @@ const SIGN_ROUTE_CONTINUITY_SAMPLE_STEP_PX = 1.2;
 const SIGN_ROUTE_CORNER_TRIANGLE_REMOVE_MAX_PX = 50;
 const STOP_OVERLAY_TRIP_CANDIDATE_LIMIT = 24;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
+const PRELOADED_SUMMARY_MIN_VERSION = 4;
 const PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS = [
   "route_id",
   "direction_id",
@@ -207,13 +207,6 @@ function parseGtfsTimeToSeconds(v) {
   if (!Number.isFinite(h) || !Number.isFinite(mi) || !Number.isFinite(s)) return null;
   if (mi < 0 || mi > 59 || s < 0 || s > 59 || h < 0) return null;
   return (h * 3600) + (mi * 60) + s;
-}
-
-function dateToYmdKey(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return Number.parseInt(`${y}${m}${day}`, 10);
 }
 
 function parseGtfsDateKey(v) {
@@ -333,57 +326,121 @@ function setUpdatesUi({ showButton = false, showStatus = false, statusText = "GT
   }
 }
 
-function getLast7DatesInfo() {
-  const today = new Date();
-  const base = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const out = [];
-  for (let i = 6; i >= 0; i -= 1) {
-    const d = new Date(base);
-    d.setDate(base.getDate() - i);
-    out.push({ key: dateToYmdKey(d), weekday: d.getDay() });
-  }
+function dateKeyToUtcDate(dateKey) {
+  const raw = String(Math.trunc(dateKey || 0)).padStart(8, "0");
+  const y = Number.parseInt(raw.slice(0, 4), 10);
+  const m = Number.parseInt(raw.slice(4, 6), 10);
+  const d = Number.parseInt(raw.slice(6, 8), 10);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+  const out = new Date(Date.UTC(y, m - 1, d));
+  if (
+    out.getUTCFullYear() !== y
+    || (out.getUTCMonth() + 1) !== m
+    || out.getUTCDate() !== d
+  ) return null;
   return out;
 }
 
-function buildServiceActiveDatesLastWeek(calendarRows, calendarDateRows) {
-  const weekInfo = getLast7DatesInfo();
-  const weekKeys = new Set(weekInfo.map((x) => x.key));
-  lastWeekWeekdayByDateKey = new Map(weekInfo.map((x) => [x.key, x.weekday]));
-  const out = new Map();
+function utcDateToDateKey(d) {
+  if (!(d instanceof Date)) return null;
+  return Number.parseInt(
+    `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`,
+    10,
+  );
+}
 
+function weekdayFromDateKey(dateKey) {
+  const d = dateKeyToUtcDate(dateKey);
+  return d ? d.getUTCDay() : null;
+}
+
+function forEachDateKeyInRange(startKey, endKey, cb) {
+  const start = dateKeyToUtcDate(startKey);
+  const end = dateKeyToUtcDate(endKey);
+  if (!start || !end || start > end || typeof cb !== "function") return;
+
+  const cur = new Date(start.getTime());
+  while (cur <= end) {
+    const key = utcDateToDateKey(cur);
+    if (key != null && cb(key) === true) break;
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+}
+
+function buildServiceActiveWeekdays(calendarRows, calendarDateRows) {
+  const calendarByService = new Map();
+  const exceptionsByService = new Map();
   const weekdayCols = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
   for (const row of calendarRows || []) {
-    const sid = row.service_id;
+    const sid = String(row?.service_id || "").trim();
     if (!sid) continue;
-    const start = parseGtfsDateKey(row.start_date);
-    const end = parseGtfsDateKey(row.end_date);
-    if (start == null || end == null) continue;
-    for (const w of weekInfo) {
-      if (w.key < start || w.key > end) continue;
-      const col = weekdayCols[w.weekday];
-      if (String(row[col] || "0").trim() !== "1") continue;
-      let set = out.get(sid);
-      if (!set) {
-        set = new Set();
-        out.set(sid, set);
-      }
-      set.add(w.key);
+    const start = parseGtfsDateKey(row?.start_date);
+    const end = parseGtfsDateKey(row?.end_date);
+    if (start == null || end == null || end < start) continue;
+    const flags = weekdayCols.map((col) => String(row?.[col] || "0").trim() === "1");
+    let arr = calendarByService.get(sid);
+    if (!arr) {
+      arr = [];
+      calendarByService.set(sid, arr);
     }
+    arr.push({ start, end, flags });
   }
 
   for (const row of calendarDateRows || []) {
-    const sid = row.service_id;
-    const key = parseGtfsDateKey(row.date);
-    const exType = String(row.exception_type || "").trim();
-    if (!sid || key == null || !weekKeys.has(key)) continue;
-    let set = out.get(sid);
-    if (!set) {
-      set = new Set();
-      out.set(sid, set);
+    const sid = String(row?.service_id || "").trim();
+    const key = parseGtfsDateKey(row?.date);
+    const exType = String(row?.exception_type || "").trim();
+    if (!sid || key == null || (exType !== "1" && exType !== "2")) continue;
+    let byDate = exceptionsByService.get(sid);
+    if (!byDate) {
+      byDate = new Map();
+      exceptionsByService.set(sid, byDate);
     }
-    if (exType === "1") set.add(key);
-    else if (exType === "2") set.delete(key);
+    byDate.set(key, exType);
+  }
+
+  const serviceIds = new Set([...calendarByService.keys(), ...exceptionsByService.keys()]);
+  const out = new Map();
+
+  for (const sid of serviceIds) {
+    const rows = calendarByService.get(sid) || [];
+    const byDate = exceptionsByService.get(sid) || new Map();
+    let minKey = Infinity;
+    let maxKey = -Infinity;
+    for (const row of rows) {
+      if (row.start < minKey) minKey = row.start;
+      if (row.end > maxKey) maxKey = row.end;
+    }
+    for (const key of byDate.keys()) {
+      if (key < minKey) minKey = key;
+      if (key > maxKey) maxKey = key;
+    }
+    if (!Number.isFinite(minKey) || !Number.isFinite(maxKey) || maxKey < minKey) continue;
+
+    const activeWeekdays = new Set();
+    forEachDateKeyInRange(minKey, maxKey, (dateKey) => {
+      const weekday = weekdayFromDateKey(dateKey);
+      if (weekday == null) return false;
+
+      let isActive = false;
+      for (const row of rows) {
+        if (dateKey < row.start || dateKey > row.end) continue;
+        if (row.flags[weekday]) {
+          isActive = true;
+          break;
+        }
+      }
+
+      const exType = byDate.get(dateKey);
+      if (exType === "1") isActive = true;
+      else if (exType === "2") isActive = false;
+
+      if (isActive) activeWeekdays.add(weekday);
+      return activeWeekdays.size >= 7;
+    });
+
+    if (activeWeekdays.size > 0) out.set(sid, activeWeekdays);
   }
 
   return out;
@@ -4172,8 +4229,8 @@ function computeRouteSummaryForStop(stop, directionFilter) {
   for (const tripId of tripSet) {
     const t = tripsById.get(tripId);
     if (!t) continue;
-    const serviceDates = serviceActiveDatesLastWeekById.get(t.service_id);
-    if (hasServiceCalendarData && (!serviceDates || serviceDates.size === 0)) continue;
+    const serviceWeekdays = serviceActiveWeekdaysById.get(t.service_id);
+    if (hasServiceCalendarData && (!serviceWeekdays || serviceWeekdays.size === 0)) continue;
 
     const dir = (t.direction_id === "" || t.direction_id == null) ? null : String(t.direction_id);
     if (directionFilter !== "all" && String(dir) !== String(directionFilter)) continue;
@@ -4203,10 +4260,10 @@ function computeRouteSummaryForStop(stop, directionFilter) {
     }
     const depSec = tripTimesForStop.get(tripId);
     if (depSec != null) {
-      if (serviceDates && serviceDates.size > 0) {
-        for (const dateKey of serviceDates) {
-          const weekday = lastWeekWeekdayByDateKey.get(dateKey);
-          if (weekday == null) continue;
+      if (serviceWeekdays && serviceWeekdays.size > 0) {
+        for (const weekdayRaw of serviceWeekdays) {
+          const weekday = Number(weekdayRaw);
+          if (!Number.isFinite(weekday)) continue;
           cur.times.push(depSec);
           const groupKey = dayGroupKeyFromWeekday(weekday);
           cur.timesByGroup[groupKey].push(depSec);
@@ -4398,6 +4455,13 @@ async function tryLoadPreloadedRouteSummaries() {
     const res = await fetch(PRELOADED_SUMMARY_URL, { cache: "no-cache" });
     if (!res.ok) return false;
     const preloadData = await res.json();
+    const version = Number.parseInt(preloadData?.version, 10) || 1;
+    if (version >= 2 && version < PRELOADED_SUMMARY_MIN_VERSION) {
+      console.warn(
+        `Preloaded summaries v${version} are stale for active-hours accuracy; rebuilding from GTFS stop_times.`,
+      );
+      return false;
+    }
     return loadRouteSummaryCacheFromData(preloadData);
   } catch {
     return false;
@@ -4453,8 +4517,7 @@ async function buildRouteSummariesInWorker(stopTimesBuffer, generationAtStart) {
       tripsById: mapToObject(tripsById),
       routesById: mapToObject(routesById),
       hasServiceCalendarData,
-      serviceActiveDatesLastWeekById: mapToObject(serviceActiveDatesLastWeekById, (set) => Array.from(set)),
-      lastWeekWeekdayByDateKey: mapToObject(lastWeekWeekdayByDateKey),
+      serviceActiveWeekdaysById: mapToObject(serviceActiveWeekdaysById, (set) => Array.from(set)),
     }, [stopTimesBuffer]);
   });
 }
@@ -5157,8 +5220,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
   stopToTrips = new Map();
   stopTripTimes = new Map();
   shapesById = new Map();
-  serviceActiveDatesLastWeekById = new Map();
-  lastWeekWeekdayByDateKey = new Map();
+  serviceActiveWeekdaysById = new Map();
   hasServiceCalendarData = false;
   feedUpdatedDateLabel = "";
   feedUpdatedDateKey = null;
@@ -5313,7 +5375,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
 
     hasServiceCalendarData = calendarRows.length > 0 || calendarDateRows.length > 0;
     if (hasServiceCalendarData) {
-      serviceActiveDatesLastWeekById = buildServiceActiveDatesLastWeek(calendarRows, calendarDateRows);
+      serviceActiveWeekdaysById = buildServiceActiveWeekdays(calendarRows, calendarDateRows);
     }
     if (generationAtStart !== bootGeneration) return;
 

@@ -123,7 +123,7 @@ function buildSummaryItemsFromAgg(aggMap, routesById) {
   return items;
 }
 
-function computeStopSummaries({ stopTripTimesById, tripsById, routesById, hasServiceCalendarData, serviceActiveDatesLastWeekById, lastWeekWeekdayByDateKey }) {
+function computeStopSummaries({ stopTripTimesById, tripsById, routesById, hasServiceCalendarData, serviceActiveWeekdaysById }) {
   const outStops = {};
 
   for (const [stopId, byTrip] of stopTripTimesById.entries()) {
@@ -132,8 +132,8 @@ function computeStopSummaries({ stopTripTimesById, tripsById, routesById, hasSer
     for (const [tripId, depSec] of byTrip.entries()) {
       const t = tripsById[tripId];
       if (!t) continue;
-      const serviceDates = serviceActiveDatesLastWeekById[t.service_id];
-      if (hasServiceCalendarData && (!serviceDates || serviceDates.length === 0)) continue;
+      const serviceWeekdays = serviceActiveWeekdaysById[t.service_id];
+      if (hasServiceCalendarData && (!serviceWeekdays || serviceWeekdays.length === 0)) continue;
 
       const dir = (t.direction_id === "" || t.direction_id == null) ? null : String(t.direction_id);
       const route = routesById[t.route_id];
@@ -161,13 +161,12 @@ function computeStopSummaries({ stopTripTimesById, tripsById, routesById, hasSer
         cur.headsignCounts.set(headsign, prev + 1);
       }
       if (depSec != null) {
-        if (serviceDates && serviceDates.length > 0) {
-          for (const dateKeyRaw of serviceDates) {
-            const dateKey = Number(dateKeyRaw);
-            const weekday = lastWeekWeekdayByDateKey[String(dateKey)] ?? lastWeekWeekdayByDateKey[dateKey];
-            if (weekday == null) continue;
+        if (serviceWeekdays && serviceWeekdays.length > 0) {
+          for (const weekdayRaw of serviceWeekdays) {
+            const weekday = Number(weekdayRaw);
+            if (!Number.isFinite(weekday)) continue;
             cur.times.push(depSec);
-            const groupKey = dayGroupKeyFromWeekday(Number(weekday));
+            const groupKey = dayGroupKeyFromWeekday(weekday);
             cur.timesByGroup[groupKey].push(depSec);
           }
         } else {
@@ -237,8 +236,7 @@ self.onmessage = async (ev) => {
       tripsById,
       routesById,
       hasServiceCalendarData,
-      serviceActiveDatesLastWeekById,
-      lastWeekWeekdayByDateKey,
+      serviceActiveWeekdaysById,
     } = msg;
 
     const stopTimesText = new TextDecoder("utf-8").decode(stopTimesBuffer);
@@ -248,8 +246,7 @@ self.onmessage = async (ev) => {
       tripsById: tripsById || {},
       routesById: routesById || {},
       hasServiceCalendarData: !!hasServiceCalendarData,
-      serviceActiveDatesLastWeekById: serviceActiveDatesLastWeekById || {},
-      lastWeekWeekdayByDateKey: lastWeekWeekdayByDateKey || {},
+      serviceActiveWeekdaysById: serviceActiveWeekdaysById || {},
     });
 
     postMessage({

@@ -177,20 +177,35 @@ def iter_csv_rows(zf, name):
             yield row
 
 
-def get_last_7_dates():
-    today = dt.date.today()
-    return [today - dt.timedelta(days=i) for i in range(6, -1, -1)]
+def date_from_key(date_key):
+    if date_key is None:
+        return None
+    raw = str(int(date_key)).zfill(8)
+    try:
+        return dt.date(int(raw[0:4]), int(raw[4:6]), int(raw[6:8]))
+    except ValueError:
+        return None
 
 
-def to_ymd_key(d):
+def date_key_from_date(d):
     return int(f"{d.year:04d}{d.month:02d}{d.day:02d}")
 
 
-def build_service_active_dates_last_week(calendar_rows, calendar_date_rows):
-    week = get_last_7_dates()
-    week_keys = {to_ymd_key(d) for d in week}
-    weekday_by_key = {to_ymd_key(d): d.weekday() for d in week}  # Mon=0..Sun=6
-    out = {}
+def iter_date_keys(start_key, end_key):
+    start = date_from_key(start_key)
+    end = date_from_key(end_key)
+    if start is None or end is None or end < start:
+        return
+    cur = start
+    step = dt.timedelta(days=1)
+    while cur <= end:
+        yield date_key_from_date(cur), cur.weekday()  # Monday=0..Sunday=6
+        cur += step
+
+
+def build_service_active_weekdays(calendar_rows, calendar_date_rows):
+    calendar_by_service = {}
+    exceptions_by_service = {}
 
     weekday_cols = [
         "monday",
@@ -203,36 +218,74 @@ def build_service_active_dates_last_week(calendar_rows, calendar_date_rows):
     ]
 
     for row in calendar_rows:
-        sid = row.get("service_id")
+        sid = str(row.get("service_id") or "").strip()
         if not sid:
             continue
         start = parse_date_key(row.get("start_date"))
         end = parse_date_key(row.get("end_date"))
-        if start is None or end is None:
+        if start is None or end is None or end < start:
             continue
-        s = out.setdefault(sid, set())
-        for d in week:
-            key = to_ymd_key(d)
-            if key < start or key > end:
-                continue
-            weekday = d.weekday()
-            col = weekday_cols[weekday]
-            if str(row.get(col, "0")).strip() == "1":
-                s.add(key)
+        flags = [str(row.get(col, "0")).strip() == "1" for col in weekday_cols]
+        calendar_by_service.setdefault(sid, []).append({
+            "start": start,
+            "end": end,
+            "flags": flags,
+        })
 
     for row in calendar_date_rows:
-        sid = row.get("service_id")
+        sid = str(row.get("service_id") or "").strip()
         key = parse_date_key(row.get("date"))
-        ex_type = str(row.get("exception_type", "")).strip()
-        if not sid or key is None or key not in week_keys:
+        ex_type = str(row.get("exception_type") or "").strip()
+        if not sid or key is None or ex_type not in ("1", "2"):
             continue
-        s = out.setdefault(sid, set())
-        if ex_type == "1":
-            s.add(key)
-        elif ex_type == "2":
-            s.discard(key)
+        exceptions_by_service.setdefault(sid, {})[key] = ex_type
 
-    return out, weekday_by_key
+    service_ids = set(calendar_by_service.keys()) | set(exceptions_by_service.keys())
+    out = {}
+
+    for sid in service_ids:
+        rows = calendar_by_service.get(sid, [])
+        by_date = exceptions_by_service.get(sid, {})
+
+        min_key = None
+        max_key = None
+        for row in rows:
+            start = row["start"]
+            end = row["end"]
+            min_key = start if min_key is None else min(min_key, start)
+            max_key = end if max_key is None else max(max_key, end)
+        for key in by_date.keys():
+            min_key = key if min_key is None else min(min_key, key)
+            max_key = key if max_key is None else max(max_key, key)
+
+        if min_key is None or max_key is None:
+            continue
+
+        weekdays = set()
+        for date_key, weekday in iter_date_keys(min_key, max_key):
+            is_active = False
+            for row in rows:
+                if date_key < row["start"] or date_key > row["end"]:
+                    continue
+                if row["flags"][weekday]:
+                    is_active = True
+                    break
+
+            ex_type = by_date.get(date_key)
+            if ex_type == "1":
+                is_active = True
+            elif ex_type == "2":
+                is_active = False
+
+            if is_active:
+                weekdays.add(weekday)
+            if len(weekdays) >= 7:
+                break
+
+        if weekdays:
+            out[sid] = weekdays
+
+    return out
 
 
 def build_summary_items(agg_items, routes_by_id):
@@ -422,7 +475,7 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
             )
 
     has_service_calendar_data = bool(calendar or calendar_dates)
-    service_dates_by_id, weekday_by_date = build_service_active_dates_last_week(calendar, calendar_dates)
+    service_weekdays_by_id = build_service_active_weekdays(calendar, calendar_dates)
 
     # stop_id -> trip_id -> earliest departure seconds
     stop_trip_time = {}
@@ -481,8 +534,8 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
             if not t:
                 continue
 
-            service_dates = service_dates_by_id.get(t["service_id"], set())
-            if has_service_calendar_data and not service_dates:
+            service_weekdays = service_weekdays_by_id.get(t["service_id"], set())
+            if has_service_calendar_data and not service_weekdays:
                 continue
 
             direction = t["direction_id"] if t["direction_id"] != "" else None
@@ -510,11 +563,8 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
                 cur["headsignCounts"][headsign] = cur["headsignCounts"].get(headsign, 0) + 1
 
             if dep_sec is not None:
-                if service_dates:
-                    for date_key in service_dates:
-                        weekday = weekday_by_date.get(date_key)
-                        if weekday is None:
-                            continue
+                if service_weekdays:
+                    for weekday in service_weekdays:
                         cur["times"].append(dep_sec)
                         group_key = day_group_key_from_weekday(weekday)
                         cur["timesByGroup"][group_key].append(dep_sec)
@@ -564,7 +614,7 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
                 output_stop_overlays[stop_id] = overlays_for_stop
 
     out = {
-        "version": 3,
+        "version": 4,
         "generated_at": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "source_zip": os.path.basename(ZIP_PATH),
         "item_fields": COMPACT_ITEM_FIELDS,
