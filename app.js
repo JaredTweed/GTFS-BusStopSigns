@@ -3157,6 +3157,9 @@ function suppressTinyCornerTriangles(samples, maxTrianglePx = SIGN_ROUTE_CORNER_
   if (maxPx <= 0) return samples;
 
   const out = samples.slice();
+  const zigCrossMin = Math.max(0.25, Math.min(0.8, maxPx * 0.008));
+  const zigMiddleMax = Math.max(0.9, Math.min(4.5, maxPx * 0.08));
+  const zigSpikeMax = Math.max(0.35, Math.min(4.5, maxPx * 0.09));
   const maxPasses = 6;
   for (let pass = 0; pass < maxPasses; pass += 1) {
     let changed = false;
@@ -3181,31 +3184,57 @@ function suppressTinyCornerTriangles(samples, maxTrianglePx = SIGN_ROUTE_CORNER_
         continue;
       }
 
-      // Candidate for the "4"-shaped notch: a tiny local corner triangle.
+      // Candidate 1: very sharp tiny corner triangle.
       const dot = ((v1x * v2x) + (v1y * v2y)) / (l1 * l2);
-      // Use a relatively permissive turn threshold here because the
-      // centerline is densely sampled; tiny triangle artifacts often appear
-      // as moderate local turns spread over a few short samples.
-      if (dot > 0.85) {
-        i += 1;
-        continue;
-      }
-
       const spikePx = Math.sqrt(pointToSegmentDistanceSq(p1, p0, p2));
       const baseLen = Math.hypot(p2.x - p0.x, p2.y - p0.y);
       const area2 = Math.abs(((p1.x - p0.x) * (p2.y - p0.y)) - ((p1.y - p0.y) * (p2.x - p0.x)));
-      if (
-        !Number.isFinite(spikePx) || spikePx > maxPx
-        || !Number.isFinite(baseLen) || baseLen > (maxPx * 2)
-        || !Number.isFinite(area2) || ((area2 * 0.5) > (maxPx * maxPx * 2))
-      ) {
-        i += 1;
+      const isSharpTiny = (
+        dot <= 0.25
+        && Number.isFinite(spikePx) && spikePx <= maxPx
+        && Number.isFinite(baseLen) && baseLen <= (maxPx * 2)
+        && Number.isFinite(area2) && ((area2 * 0.5) <= (maxPx * maxPx * 2))
+      );
+      if (isSharpTiny) {
+        out.splice(i, 1);
+        changed = true;
         continue;
       }
 
-      // Collapse tiny corner triangle into a plain corner.
-      out.splice(i, 1);
-      changed = true;
+      // Candidate 2: tiny zigzag ("4") notch over two consecutive turns.
+      if (i < out.length - 2) {
+        const p3 = out[i + 2];
+        const v3x = p3.x - p2.x;
+        const v3y = p3.y - p2.y;
+        const l3 = Math.hypot(v3x, v3y);
+        if (l3 > 1e-4) {
+          const cross1 = (v1x * v2y) - (v1y * v2x);
+          const cross2 = (v2x * v3y) - (v2y * v3x);
+          const flipsSide = (cross1 * cross2) < 0;
+          if (
+            flipsSide
+            && Math.abs(cross1) >= zigCrossMin
+            && Math.abs(cross2) >= zigCrossMin
+            && l2 <= zigMiddleMax
+          ) {
+            const spike1 = spikePx;
+            const spike2 = Math.sqrt(pointToSegmentDistanceSq(p2, p1, p3));
+            if (
+              Number.isFinite(spike1) && Number.isFinite(spike2)
+              && (spike1 <= zigSpikeMax || spike2 <= zigSpikeMax)
+            ) {
+              const removeIdx = (spike2 < spike1) ? (i + 1) : i;
+              out.splice(removeIdx, 1);
+              changed = true;
+              if (removeIdx === i) continue;
+              i += 1;
+              continue;
+            }
+          }
+        }
+      }
+
+      i += 1;
     }
     if (!changed) break;
     if (out.length < 3) break;
