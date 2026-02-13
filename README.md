@@ -8,11 +8,15 @@ I heard that the largest reason for poor signage is due to the frequency of how 
 
 ## Examples
 
-![alt text](examples/image.png)
+![#50536.png](examples/%2350536.png)
 
-![alt text](examples/image2.png)
+![#52355.png](examples/%2352355.png)
 
-![alt text](examples/image3.png)
+![#54989.png](examples/%2354989.png)
+
+![#54997.png](examples/%2354997.png)
+
+![#62012.png](examples/%2362012.png)
 
 ## TODO
 
