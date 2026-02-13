@@ -32925,7 +32925,7 @@ route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,block_id,
 17707,1,14866694,337 Surrey Central Station,,1,2161920,310497,0,1
 17707,1,14866695,337 Surrey Central Station,,1,2161637,310497,0,1
 17707,1,14866696,337 Surrey Central Station,,1,2161916,310497,0,1
-17707,1,14866697,337 Surrey Central Station,,1,2161504,310498,0,1
+17707,1,14866697,337 Surrey Central Station,,1,2161504,310497,0,1
 17707,1,14866698,337 Surrey Central Station,,1,2161712,310497,0,1
 17707,1,14866699,337 Guildford,,1,2161576,310496,0,1
 17707,1,14866700,337 Guildford,,1,2161576,310496,0,1
@@ -40708,8 +40708,8 @@ route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,block_id,
 6737,201,14874489,501 Surrey Central Station,,0,2161636,310657,0,1
 6737,101,14874490,501 Surrey Central Station,,0,2164346,310657,0,1
 6737,201,14874491,501 Surrey Central Station,,0,2162398,310657,0,1
-6737,101,14874492,1844 501 Surrey Central Station via 202A St,,0,2161636,310655,0,1
-6737,101,14874493,1844 501 Surrey Central Station via 202A St,,0,2162398,310655,0,1
+6737,101,14874492,501 Surrey Central Station via 202A St,,0,2161636,310655,0,1
+6737,101,14874493,501 Surrey Central Station via 202A St,,0,2162398,310655,0,1
 6737,1,14874494,501 Surrey Central Station,,0,2162397,310657,0,1
 6737,201,14874495,501 Surrey Central Station,,0,2164346,310657,0,1
 6737,1,14874496,501 Langley Centre,,1,2161648,310659,0,1

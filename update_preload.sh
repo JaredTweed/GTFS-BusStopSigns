@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ZIP_PATH="${1:-${ROOT_DIR}/google_transit.zip}"
 OUT_PATH="${2:-${ROOT_DIR}/preloaded_route_summaries.json}"
+GTFS_DIR="${3:-${ROOT_DIR}/google_transit}"
 GTFS_URL="${GTFS_URL:-https://gtfs-static.translink.ca/gtfs/google_transit.zip}"
 
 download_gtfs_zip() {
@@ -28,7 +29,37 @@ download_gtfs_zip() {
     echo "Updated GTFS zip: ${out}"
 }
 
+refresh_gtfs_folder() {
+    local zip_path="$1"
+    local out_dir="$2"
+
+    mkdir -p "$out_dir"
+
+    python3 - "$zip_path" "$out_dir" <<'PY'
+import os
+import shutil
+import sys
+import zipfile
+
+zip_path = sys.argv[1]
+out_dir = sys.argv[2]
+
+for name in os.listdir(out_dir):
+    path = os.path.join(out_dir, name)
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
+
+with zipfile.ZipFile(zip_path, "r") as zf:
+    zf.extractall(out_dir)
+PY
+
+    echo "Updated GTFS folder: ${out_dir}"
+}
+
 download_gtfs_zip "$GTFS_URL" "$ZIP_PATH"
+refresh_gtfs_folder "$ZIP_PATH" "$GTFS_DIR"
 
 python3 - "$ZIP_PATH" "$OUT_PATH" <<'PY'
 import csv
