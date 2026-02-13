@@ -622,10 +622,27 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
         "stop_overlays": output_stop_overlays,
     }
 
-    with open(OUT_PATH, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, separators=(",", ":"))
+    def comparable_payload(obj):
+        if not isinstance(obj, dict):
+            return None
+        cp = dict(obj)
+        cp.pop("generated_at", None)
+        return cp
 
-print(f"Wrote {OUT_PATH}")
+    existing = None
+    if os.path.exists(OUT_PATH):
+        try:
+            with open(OUT_PATH, "r", encoding="utf-8") as fh:
+                existing = json.load(fh)
+        except Exception:
+            existing = None
+
+    if comparable_payload(existing) == comparable_payload(out):
+        print(f"No data changes for {OUT_PATH}; keeping existing file.")
+    else:
+        with open(OUT_PATH, "w", encoding="utf-8") as fh:
+            json.dump(out, fh, separators=(",", ":"))
+        print(f"Wrote {OUT_PATH}")
 PY
 
-echo "Preload file updated: ${OUT_PATH}"
+echo "Preload update finished: ${OUT_PATH}"
