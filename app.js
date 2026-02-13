@@ -34,6 +34,7 @@ const ui = {
   copyBtn: el("copyBtn"),
   downloadSvgBtn: el("downloadSvgBtn"),
   showStopsToggle: el("showStopsToggle"),
+  showStopsToggleLabel: el("showStopsToggleLabel"),
   signWrap: el("signWrap"),
   signCanvas: el("signCanvas"),
 };
@@ -60,7 +61,7 @@ let signRenderToken = 0;
 const tileImageCache = new Map();
 let routeSummaryCache = new Map(); // `${stop_id}::${direction}` -> summary array
 let preloadedStopOverlayByStop = new Map(); // stop_id -> Map(route_id::shape_id -> [downstream_stop_id...])
-let showStopsOnSign = false;
+let showStopsOnSign = true;
 let activeZip = null;
 let bootGeneration = 0;
 let feedUpdatedDateLabel = "";
@@ -4894,10 +4895,18 @@ function rerenderSelectedStopSign() {
   }).catch((err) => console.error("Sign render failed", err));
 }
 
+function syncShowStopsToggleUi() {
+  const isOn = !!showStopsOnSign;
+  if (ui.showStopsToggle) ui.showStopsToggle.checked = isOn;
+  if (ui.showStopsToggleLabel) {
+    ui.showStopsToggleLabel.textContent = isOn ? "Hide Stops" : "Show Stops";
+  }
+}
+
 function openStop(stop) {
   selectedStop = stop;
   resetPreviewZoom();
-  if (ui.showStopsToggle) ui.showStopsToggle.checked = !!showStopsOnSign;
+  syncShowStopsToggleUi();
 
   ui.modalTitle.textContent = stop.stop_name || "Bus Stop";
   ui.modalSubtitle.textContent = stop.stop_code ? `Stop #${stop.stop_code}` : `Stop ID: ${stop.stop_id}`;
@@ -5096,6 +5105,7 @@ ui.copyBtn.addEventListener("click", async () => {
 
 ui.showStopsToggle?.addEventListener("change", () => {
   showStopsOnSign = !!ui.showStopsToggle?.checked;
+  syncShowStopsToggleUi();
   if (showStopsOnSign) {
     void prewarmStopOverlayData(bootGeneration);
   }
@@ -5393,6 +5403,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
+  syncShowStopsToggleUi();
   initMap();
   await boot({ zipUrl: DEFAULT_ZIP_URL, zipName: "google_transit.zip" });
 });

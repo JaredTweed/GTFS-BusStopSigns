@@ -43,19 +43,34 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
   padding: 12px 14px; border-bottom: 1px solid #eee;
   display:flex; align-items:flex-end; gap: 12px; flex-wrap: wrap;
 }
+.modal__controls .btn {
+  font-size: 13px;
+  line-height: 1.2;
+}
 .toggleCheck {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 700;
-  color: #333;
-  user-select: none;
+  position: relative;
 }
 .toggleCheck input {
-  width: 16px;
-  height: 16px;
-  margin: 0;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.toggleCheck .btn {
+  display: inline-block;
+  user-select: none;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+}
+.toggleCheck input:focus-visible + span {
+  box-shadow: 0 0 0 3px rgba(43, 109, 255, 0.2);
+}
+.toggleCheck input:checked + span {
+  background: #2b6dff;
+  border-color: #2b6dff;
+  color: #fff;
 }
 .field { display:flex; flex-direction: column; gap: 6px; }
 .field__label { font-size: 12px; color:#666; font-weight: 700; }
