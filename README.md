@@ -1,6 +1,6 @@
 ## Description
 
-This website generates high quality bus stop signs from GTFS zip files. By default, it uses the GTFS file for Vancouver, BC's Translink. 
+This website generates high quality bus stop signs from GTFS zip files. By default, it uses the GTFS file for Vancouver, BC's Translink which can be found [here](https://www.translink.ca/about-us/doing-business-with-translink/app-developer-resources/gtfs/gtfs-data). 
 
 I heard that the largest reason for poor signage is due to the frequency of how often the routes get updated, so I wanted to create an efficient way for people to improve the signs through guerilla/tactical urbanism. I was inspired to make the website from this video:
 
@@ -17,4 +17,3 @@ I heard that the largest reason for poor signage is due to the frequency of how 
 ## TODO
 
 - Mass download of bus signs for large areas.
-- Make lines look smoother when merging or splitting.
