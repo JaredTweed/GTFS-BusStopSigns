@@ -114,6 +114,7 @@ const SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX = 0;
 const SIGN_ROUTE_GROUP_LANE_OVERLAP_PX = 0.45;
 const SIGN_ROUTE_CONTINUITY_SMOOTHNESS_PX = 30;
 const SIGN_ROUTE_CONTINUITY_SAMPLE_STEP_PX = 1.2;
+const SIGN_ROUTE_CORNER_TRIANGLE_REMOVE_MAX_PX = 250;
 const STOP_OVERLAY_TRIP_CANDIDATE_LIMIT = 24;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS = [
@@ -3146,7 +3147,68 @@ function buildSegmentLaneSamples(metrics, edgeStates, transitions, options = {})
     const q = deduped[deduped.length - 1];
     if (Math.hypot(p.x - q.x, p.y - q.y) > 0.05) deduped.push(p);
   }
-  return deduped.length >= 2 ? deduped : samples;
+  const compacted = deduped.length >= 2 ? deduped : samples;
+  return suppressTinyCornerTriangles(compacted, SIGN_ROUTE_CORNER_TRIANGLE_REMOVE_MAX_PX);
+}
+
+function suppressTinyCornerTriangles(samples, maxTrianglePx = SIGN_ROUTE_CORNER_TRIANGLE_REMOVE_MAX_PX) {
+  if (!Array.isArray(samples) || samples.length < 3) return Array.isArray(samples) ? samples : [];
+  const maxPx = Math.max(0, Number(maxTrianglePx) || 0);
+  if (maxPx <= 0) return samples;
+
+  const out = samples.slice();
+  const maxPasses = 6;
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let changed = false;
+    for (let i = 1; i < out.length - 1; ) {
+      const p0 = out[i - 1];
+      const p1 = out[i];
+      const p2 = out[i + 1];
+      if (!p0 || !p1 || !p2) {
+        i += 1;
+        continue;
+      }
+
+      const v1x = p1.x - p0.x;
+      const v1y = p1.y - p0.y;
+      const v2x = p2.x - p1.x;
+      const v2y = p2.y - p1.y;
+      const l1 = Math.hypot(v1x, v1y);
+      const l2 = Math.hypot(v2x, v2y);
+      if (l1 <= 1e-4 || l2 <= 1e-4) {
+        out.splice(i, 1);
+        changed = true;
+        continue;
+      }
+
+      // Candidate for the "4"-shaped notch: a very sharp local turn.
+      const dot = ((v1x * v2x) + (v1y * v2y)) / (l1 * l2);
+      if (dot > 0.25) {
+        i += 1;
+        continue;
+      }
+
+      const spikePx = Math.sqrt(pointToSegmentDistanceSq(p1, p0, p2));
+      const baseLen = Math.hypot(p2.x - p0.x, p2.y - p0.y);
+      const area2 = Math.abs(((p1.x - p0.x) * (p2.y - p0.y)) - ((p1.y - p0.y) * (p2.x - p0.x)));
+      if (
+        !Number.isFinite(spikePx) || spikePx > maxPx
+        || !Number.isFinite(baseLen) || baseLen > (maxPx * 2)
+        || !Number.isFinite(area2) || ((area2 * 0.5) > (maxPx * maxPx * 2))
+      ) {
+        i += 1;
+        continue;
+      }
+
+      // Collapse tiny corner triangle into a plain corner.
+      out.splice(i, 1);
+      changed = true;
+    }
+    if (!changed) break;
+    if (out.length < 3) break;
+  }
+
+  return out;
 }
 
 function buildSegmentLaneTransitions(seg, pixelPoints, sharedLaneStateByEdgeKey) {
