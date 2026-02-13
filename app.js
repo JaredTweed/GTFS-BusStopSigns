@@ -114,7 +114,7 @@ const SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX = 0;
 const SIGN_ROUTE_GROUP_LANE_OVERLAP_PX = 0.45;
 const SIGN_ROUTE_CONTINUITY_SMOOTHNESS_PX = 30;
 const SIGN_ROUTE_CONTINUITY_SAMPLE_STEP_PX = 1.2;
-const SIGN_ROUTE_CORNER_TRIANGLE_REMOVE_MAX_PX = 250;
+const SIGN_ROUTE_CORNER_TRIANGLE_REMOVE_MAX_PX = 50;
 const STOP_OVERLAY_TRIP_CANDIDATE_LIMIT = 24;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS = [
@@ -3181,9 +3181,12 @@ function suppressTinyCornerTriangles(samples, maxTrianglePx = SIGN_ROUTE_CORNER_
         continue;
       }
 
-      // Candidate for the "4"-shaped notch: a very sharp local turn.
+      // Candidate for the "4"-shaped notch: a tiny local corner triangle.
       const dot = ((v1x * v2x) + (v1y * v2y)) / (l1 * l2);
-      if (dot > 0.25) {
+      // Use a relatively permissive turn threshold here because the
+      // centerline is densely sampled; tiny triangle artifacts often appear
+      // as moderate local turns spread over a few short samples.
+      if (dot > 0.85) {
         i += 1;
         continue;
       }
