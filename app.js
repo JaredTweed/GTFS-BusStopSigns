@@ -112,6 +112,7 @@ const SIGN_ROUTE_LINE_WIDTH_RULES = [
 ];
 const SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX = 0;
 const SIGN_ROUTE_GROUP_LANE_OVERLAP_PX = 0.45;
+const SIGN_ROUTE_SPLIT_MERGE_TRANSITION_PX = 10;
 const STOP_OVERLAY_TRIP_CANDIDATE_LIMIT = 24;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
 const PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS = [
@@ -2715,6 +2716,39 @@ function buildNonSharedRuns(points, sharedEdgeKeySet) {
   return runs;
 }
 
+function subtractIntervalsFromRange(start, end, intervals) {
+  const a = Number(start);
+  const b = Number(end);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return [];
+  if (!Array.isArray(intervals) || intervals.length === 0) return [{ start: a, end: b }];
+
+  const clipped = [];
+  for (const it of intervals) {
+    const s = Math.max(a, Number(it?.start));
+    const e = Math.min(b, Number(it?.end));
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) continue;
+    clipped.push({ start: s, end: e });
+  }
+  if (clipped.length === 0) return [{ start: a, end: b }];
+
+  clipped.sort((x, y) => x.start - y.start || x.end - y.end);
+  const merged = [];
+  for (const it of clipped) {
+    const last = merged[merged.length - 1];
+    if (!last || it.start > last.end) merged.push({ ...it });
+    else last.end = Math.max(last.end, it.end);
+  }
+
+  const remain = [];
+  let cursor = a;
+  for (const it of merged) {
+    if (it.start > cursor) remain.push({ start: cursor, end: it.start });
+    cursor = Math.max(cursor, it.end);
+  }
+  if (cursor < b) remain.push({ start: cursor, end: b });
+  return remain.filter((r) => (r.end - r.start) > 0.5);
+}
+
 function groupedRouteLineWidthForCount(groupCount) {
   const n = Number(groupCount) || 0;
   for (const rule of SIGN_ROUTE_LINE_WIDTH_RULES) {
@@ -2839,6 +2873,295 @@ function buildSharedLanePlacementData(sharedChains, projectPointToPixel) {
   }
 
   return byRouteId;
+}
+
+function buildSharedLaneStateByEdgeKey(sharedEdges) {
+  const byEdgeKey = new Map();
+  if (!Array.isArray(sharedEdges) || sharedEdges.length === 0) return byEdgeKey;
+
+  for (const edge of sharedEdges) {
+    const orderedRouteIds = Array.isArray(edge?.orderedRouteIds) && edge.orderedRouteIds.length
+      ? edge.orderedRouteIds.slice()
+      : Array.from(edge?.routeIds || []).sort();
+    if (orderedRouteIds.length < 2) continue;
+
+    const groupCount = orderedRouteIds.length;
+    const groupedWidth = groupedRouteLineWidthForCount(groupCount);
+    const laneStep = Math.max(2, groupedWidth / groupCount);
+    const laneWidthPx = Math.max(2, laneStep + SIGN_ROUTE_GROUP_LANE_OVERLAP_PX);
+    const byRoute = new Map();
+    for (let i = 0; i < orderedRouteIds.length; i += 1) {
+      const rid = orderedRouteIds[i];
+      const offsetPx = ((i - ((groupCount - 1) / 2)) * laneStep);
+      byRoute.set(rid, { offsetPx, laneWidthPx, groupCount });
+    }
+    byEdgeKey.set(edge.key, byRoute);
+  }
+
+  return byEdgeKey;
+}
+
+function laneStateNearlyEqual(a, b) {
+  if (!a || !b) return false;
+  return Math.abs((a.offsetPx || 0) - (b.offsetPx || 0)) < 0.05
+    && Math.abs((a.laneWidthPx || 0) - (b.laneWidthPx || 0)) < 0.05;
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
+}
+
+function smoothstep01(v) {
+  const t = clamp01(v);
+  return t * t * (3 - (2 * t));
+}
+
+function buildPolylineMetrics(pixelPoints) {
+  if (!Array.isArray(pixelPoints) || pixelPoints.length < 2) return null;
+  const pts = [];
+  for (const p of pixelPoints) {
+    const x = Number(p?.x);
+    const y = Number(p?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    pts.push({ x, y });
+  }
+  if (pts.length < 2) return null;
+
+  const cumulative = new Array(pts.length);
+  cumulative[0] = 0;
+  let total = 0;
+  for (let i = 1; i < pts.length; i += 1) {
+    total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    cumulative[i] = total;
+  }
+  return { points: pts, cumulative, total };
+}
+
+function polylinePointAndNormalAtDistance(metrics, distancePx) {
+  if (!metrics || !Array.isArray(metrics.points) || metrics.points.length < 2) return null;
+  const points = metrics.points;
+  const cumulative = metrics.cumulative;
+  const total = Number(metrics.total) || 0;
+  if (total <= 1e-9) {
+    return { x: points[0].x, y: points[0].y, nx: 0, ny: -1 };
+  }
+
+  const d = Math.max(0, Math.min(total, Number(distancePx) || 0));
+  let segEndIdx = 1;
+  while (segEndIdx < cumulative.length && cumulative[segEndIdx] < d) segEndIdx += 1;
+  if (segEndIdx >= points.length) segEndIdx = points.length - 1;
+
+  let a = points[segEndIdx - 1];
+  let b = points[segEndIdx];
+  let segLen = Math.hypot(b.x - a.x, b.y - a.y);
+  if (segLen <= 1e-9) {
+    for (let i = segEndIdx; i < points.length - 1; i += 1) {
+      const aa = points[i];
+      const bb = points[i + 1];
+      const ll = Math.hypot(bb.x - aa.x, bb.y - aa.y);
+      if (ll > 1e-9) {
+        a = aa;
+        b = bb;
+        segLen = ll;
+        break;
+      }
+    }
+  }
+  if (segLen <= 1e-9) {
+    for (let i = segEndIdx - 1; i >= 1; i -= 1) {
+      const aa = points[i - 1];
+      const bb = points[i];
+      const ll = Math.hypot(bb.x - aa.x, bb.y - aa.y);
+      if (ll > 1e-9) {
+        a = aa;
+        b = bb;
+        segLen = ll;
+        break;
+      }
+    }
+  }
+  if (segLen <= 1e-9) {
+    return { x: a.x, y: a.y, nx: 0, ny: -1 };
+  }
+
+  const segStartDist = cumulative[segEndIdx - 1];
+  const localT = clamp01((d - segStartDist) / segLen);
+  const x = a.x + ((b.x - a.x) * localT);
+  const y = a.y + ((b.y - a.y) * localT);
+  const tx = (b.x - a.x) / segLen;
+  const ty = (b.y - a.y) / segLen;
+  return { x, y, nx: -ty, ny: tx };
+}
+
+function buildTransitionSamples(metrics, startDist, endDist, fromState, toState) {
+  if (!metrics || !fromState || !toState) return [];
+  const a = Number(startDist);
+  const b = Number(endDist);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return [];
+  const span = b - a;
+  const steps = Math.max(2, Math.ceil(span / 1.2));
+  const out = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const t = i / steps;
+    const eased = smoothstep01(t);
+    const d = a + (span * t);
+    const center = polylinePointAndNormalAtDistance(metrics, d);
+    if (!center) continue;
+    const offsetPx = (fromState.offsetPx || 0) + (((toState.offsetPx || 0) - (fromState.offsetPx || 0)) * eased);
+    const laneWidthPx = (fromState.laneWidthPx || 0) + (((toState.laneWidthPx || 0) - (fromState.laneWidthPx || 0)) * eased);
+    out.push({
+      x: center.x + (center.nx * offsetPx),
+      y: center.y + (center.ny * offsetPx),
+      laneWidthPx: Math.max(1, laneWidthPx),
+    });
+  }
+  return out;
+}
+
+function drawTransitionSamplesOnCanvas(ctx, color, samples) {
+  if (!ctx || !color || !Array.isArray(samples) || samples.length < 2) return;
+  ctx.strokeStyle = color;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (let i = 1; i < samples.length; i += 1) {
+    const a = samples[i - 1];
+    const b = samples[i];
+    const w = Math.max(1, (a.laneWidthPx + b.laneWidthPx) / 2);
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+}
+
+function buildTransitionSamplesSvg(color, samples) {
+  if (!color || !Array.isArray(samples) || samples.length < 2) return [];
+  const parts = [];
+  for (let i = 1; i < samples.length; i += 1) {
+    const a = samples[i - 1];
+    const b = samples[i];
+    const w = Math.max(1, (a.laneWidthPx + b.laneWidthPx) / 2);
+    parts.push(
+      `<line x1="${a.x.toFixed(2)}" y1="${a.y.toFixed(2)}" x2="${b.x.toFixed(2)}" y2="${b.y.toFixed(2)}" stroke="${color}" stroke-width="${w.toFixed(2)}" stroke-linecap="round" />`,
+    );
+  }
+  return parts;
+}
+
+function buildPolylineSlicePoints(metrics, startDist, endDist) {
+  if (!metrics || !Array.isArray(metrics.points) || metrics.points.length < 2) return [];
+  const total = Number(metrics.total) || 0;
+  if (total <= 1e-9) return [];
+
+  const s = Math.max(0, Math.min(total, Number(startDist) || 0));
+  const e = Math.max(0, Math.min(total, Number(endDist) || 0));
+  if (e - s <= 0.5) return [];
+
+  const sp = polylinePointAndNormalAtDistance(metrics, s);
+  const ep = polylinePointAndNormalAtDistance(metrics, e);
+  if (!sp || !ep) return [];
+
+  const out = [{ x: sp.x, y: sp.y }];
+  for (let i = 1; i < metrics.points.length - 1; i += 1) {
+    const d = metrics.cumulative[i];
+    if (d > s + 1e-4 && d < e - 1e-4) out.push(metrics.points[i]);
+  }
+  if (Math.hypot(out[out.length - 1].x - ep.x, out[out.length - 1].y - ep.y) > 1e-4) {
+    out.push({ x: ep.x, y: ep.y });
+  }
+
+  return out.length >= 2 ? out : [];
+}
+
+function drawCenterPolylineOnCanvas(ctx, pixelPoints, color, width) {
+  if (!ctx || !Array.isArray(pixelPoints) || pixelPoints.length < 2 || !color) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  for (let i = 0; i < pixelPoints.length; i += 1) {
+    const p = pixelPoints[i];
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+}
+
+function laneStateAtDistance(edgeStates, cumulative, distancePx, fallbackState) {
+  const fallback = fallbackState || { offsetPx: 0, laneWidthPx: groupedRouteLineWidthForCount(1), groupCount: 1 };
+  if (!Array.isArray(edgeStates) || edgeStates.length === 0 || !Array.isArray(cumulative) || cumulative.length < 2) {
+    return fallback;
+  }
+
+  const d = Number(distancePx);
+  if (!Number.isFinite(d)) return edgeStates[0] || fallback;
+
+  let idx = 0;
+  while (idx < edgeStates.length - 1 && cumulative[idx + 1] <= d) idx += 1;
+  return edgeStates[idx] || fallback;
+}
+
+function buildSegmentLaneTransitions(seg, pixelPoints, sharedLaneStateByEdgeKey) {
+  const transitions = [];
+  if (!seg || !Array.isArray(seg.points) || seg.points.length < 3 || !Array.isArray(pixelPoints) || pixelPoints.length < 3) {
+    return { metrics: buildPolylineMetrics(pixelPoints), edgeStates: [], transitions };
+  }
+
+  const metrics = buildPolylineMetrics(pixelPoints);
+  if (!metrics || metrics.total <= 1e-9) return { metrics, edgeStates: [], transitions };
+
+  const transitionPx = Math.max(0, Number(SIGN_ROUTE_SPLIT_MERGE_TRANSITION_PX) || 0);
+  const rid = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+  const baseState = {
+    offsetPx: 0,
+    laneWidthPx: groupedRouteLineWidthForCount(1),
+    groupCount: 1,
+  };
+
+  const edgeStates = new Array(seg.points.length - 1);
+  for (let i = 0; i < seg.points.length - 1; i += 1) {
+    const eKey = edgeKey(seg.points[i], seg.points[i + 1]);
+    const byRoute = sharedLaneStateByEdgeKey.get(eKey);
+    edgeStates[i] = byRoute?.get(rid) || baseState;
+  }
+  if (transitionPx <= 0) return { metrics, edgeStates, transitions };
+
+  for (let i = 1; i < edgeStates.length; i += 1) {
+    const prevState = edgeStates[i - 1];
+    const nextState = edgeStates[i];
+    if (laneStateNearlyEqual(prevState, nextState)) continue;
+
+    const vertexDist = metrics.cumulative[i];
+    if (!Number.isFinite(vertexDist)) continue;
+
+    let startDist = 0;
+    let endDist = 0;
+    const prevCount = Number(prevState.groupCount) || 1;
+    const nextCount = Number(nextState.groupCount) || 1;
+    if (prevCount > nextCount) {
+      startDist = vertexDist;
+      endDist = Math.min(metrics.total, vertexDist + transitionPx);
+    } else if (prevCount < nextCount) {
+      startDist = Math.max(0, vertexDist - transitionPx);
+      endDist = vertexDist;
+    } else {
+      const half = transitionPx / 2;
+      startDist = Math.max(0, vertexDist - half);
+      endDist = Math.min(metrics.total, vertexDist + half);
+    }
+
+    if (!Number.isFinite(startDist) || !Number.isFinite(endDist) || endDist - startDist < 0.5) continue;
+    transitions.push({
+      startDist,
+      endDist,
+      fromState: prevState,
+      toState: nextState,
+    });
+  }
+
+  return { metrics, edgeStates, transitions };
 }
 
 function markerPixelPositionOnRouteLane(seg, marker, projectPointToPixel, segPixelPointsCache, sharedLaneByRouteId) {
@@ -3577,45 +3900,69 @@ async function drawRoutePreviewOnCanvas(ctx, {
     sharedChains,
     (lat, lon) => project(lat, lon),
   );
-  const sharedEdgeKeySet = new Set(sharedEdges.map((e) => e.key));
+  const sharedLaneStateByEdgeKey = buildSharedLaneStateByEdgeKey(sharedEdges);
   const segPixelPointsCache = new Map();
+  const transitionBySegKey = new Map();
 
   for (const seg of segments) {
-    const runs = buildNonSharedRuns(seg.points, sharedEdgeKeySet);
-    for (const run of runs) {
-      const pixelPoints = run.map(([lat, lon]) => {
+    const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+    let segPixelPoints = segPixelPointsCache.get(segKey);
+    if (!segPixelPoints) {
+      segPixelPoints = seg.points.map(([lat, lon]) => {
         const [px, py] = project(lat, lon);
         return { x: px, y: py };
       });
-      if (pixelPoints.length < 2) continue;
+      segPixelPointsCache.set(segKey, segPixelPoints);
+    }
+    transitionBySegKey.set(
+      segKey,
+      buildSegmentLaneTransitions(seg, segPixelPoints, sharedLaneStateByEdgeKey),
+    );
+  }
 
-      ctx.strokeStyle = seg.lineColor;
-      ctx.lineWidth = groupedRouteLineWidthForCount(1);
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.beginPath();
-      for (let i = 0; i < pixelPoints.length; i += 1) {
-        const p = pixelPoints[i];
-        if (i === 0) ctx.moveTo(p.x, p.y);
-        else ctx.lineTo(p.x, p.y);
-      }
-      ctx.stroke();
+  for (const seg of segments) {
+    const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+    const segTransition = transitionBySegKey.get(segKey);
+    const metrics = segTransition?.metrics;
+    const transitions = Array.isArray(segTransition?.transitions) ? segTransition.transitions : [];
+    const edgeStates = Array.isArray(segTransition?.edgeStates) ? segTransition.edgeStates : [];
+    if (!metrics || !Array.isArray(metrics.cumulative) || !Number.isFinite(metrics.total) || metrics.total <= 0) {
+      const fallbackPts = seg.points.map(([lat, lon]) => {
+        const [px, py] = project(lat, lon);
+        return { x: px, y: py };
+      });
+      drawCenterPolylineOnCanvas(ctx, fallbackPts, seg.lineColor, groupedRouteLineWidthForCount(1));
+      continue;
+    }
+
+    const cutIntervals = transitions.map((t) => ({ start: t.startDist, end: t.endDist }));
+    const keptRanges = subtractIntervalsFromRange(0, metrics.total, cutIntervals);
+    const fallbackState = { offsetPx: 0, laneWidthPx: groupedRouteLineWidthForCount(1), groupCount: 1 };
+    for (const kept of keptRanges) {
+      const slice = buildPolylineSlicePoints(metrics, kept.start, kept.end);
+      if (slice.length < 2) continue;
+      const mid = (kept.start + kept.end) / 2;
+      const state = laneStateAtDistance(edgeStates, metrics.cumulative, mid, fallbackState);
+      const shifted = Math.abs(Number(state?.offsetPx) || 0) > 1e-6
+        ? offsetPolylinePixels(slice, Number(state.offsetPx) || 0)
+        : slice;
+      drawCenterPolylineOnCanvas(
+        ctx,
+        shifted,
+        seg.lineColor,
+        Math.max(1, Number(state?.laneWidthPx) || fallbackState.laneWidthPx),
+      );
     }
   }
 
-  for (const chain of sharedChains) {
-    const pixelPoints = chain.points.map(([lat, lon]) => {
-      const [px, py] = project(lat, lon);
-      return { x: px, y: py };
-    });
-    const groupedWidth = groupedRouteLineWidthForCount(chain.colors?.length || 0);
-    drawStripedPolylineOnCanvas(ctx, pixelPoints, chain.colors, groupedWidth, {
-      lineCap: "butt",
-      simplifyTolerancePx: SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX,
-      laneOverlapPx: SIGN_ROUTE_GROUP_LANE_OVERLAP_PX,
-      roundCapStart: !!chain.roundCapStart,
-      roundCapEnd: !!chain.roundCapEnd,
-    });
+  for (const seg of segments) {
+    const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+    const { metrics, transitions } = transitionBySegKey.get(segKey) || {};
+    if (!metrics || !Array.isArray(transitions) || transitions.length === 0) continue;
+    for (const tr of transitions) {
+      const samples = buildTransitionSamples(metrics, tr.startDist, tr.endDist, tr.fromState, tr.toState);
+      drawTransitionSamplesOnCanvas(ctx, seg.lineColor, samples);
+    }
   }
 
   if (showStops && routeStopMarkersBySegment instanceof Map) {
@@ -4218,7 +4565,7 @@ async function buildSignSvg({
   const bounds = getRouteBounds(stop, routeSegments);
   const sharedEdges = buildSharedEdges(routeSegments, stop);
   const sharedChains = buildSharedLaneChains(sharedEdges);
-  const sharedEdgeKeySet = new Set(sharedEdges.map((e) => e.key));
+  const sharedLaneStateByEdgeKey = buildSharedLaneStateByEdgeKey(sharedEdges);
 
   const mapOuterX = pad;
   const mapOuterY = mapY;
@@ -4236,6 +4583,23 @@ async function buildSignSvg({
     (lat, lon) => project(lat, lon),
   );
   const segPixelPointsCache = new Map();
+  const transitionBySegKey = new Map();
+
+  for (const seg of routeSegments) {
+    const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+    let segPixelPoints = segPixelPointsCache.get(segKey);
+    if (!segPixelPoints) {
+      segPixelPoints = seg.points.map(([lat, lon]) => {
+        const [px, py] = project(lat, lon);
+        return { x: px, y: py };
+      });
+      segPixelPointsCache.set(segKey, segPixelPoints);
+    }
+    transitionBySegKey.set(
+      segKey,
+      buildSegmentLaneTransitions(seg, segPixelPoints, sharedLaneStateByEdgeKey),
+    );
+  }
 
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
@@ -4288,48 +4652,47 @@ async function buildSignSvg({
 
   const routePathSvg = [];
   for (const seg of routeSegments) {
-    const runs = buildNonSharedRuns(seg.points, sharedEdgeKeySet);
-    for (const run of runs) {
-      const d = run.map(([lat, lon], i) => {
+    const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+    const segTransition = transitionBySegKey.get(segKey);
+    const metrics = segTransition?.metrics;
+    const transitions = Array.isArray(segTransition?.transitions) ? segTransition.transitions : [];
+    const edgeStates = Array.isArray(segTransition?.edgeStates) ? segTransition.edgeStates : [];
+    if (!metrics || !Array.isArray(metrics.cumulative) || !Number.isFinite(metrics.total) || metrics.total <= 0) {
+      const fallback = seg.points.map(([lat, lon], i) => {
         const [x, y] = project(lat, lon);
         return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
       }).join(" ");
-      routePathSvg.push(`<path d="${d}" fill="none" stroke="${seg.lineColor}" stroke-width="${groupedRouteLineWidthForCount(1)}" stroke-linecap="round" stroke-linejoin="round" />`);
+      routePathSvg.push(`<path d="${fallback}" fill="none" stroke="${seg.lineColor}" stroke-width="${groupedRouteLineWidthForCount(1)}" stroke-linecap="round" stroke-linejoin="round" />`);
+      continue;
+    }
+
+    const cutIntervals = transitions.map((t) => ({ start: t.startDist, end: t.endDist }));
+    const keptRanges = subtractIntervalsFromRange(0, metrics.total, cutIntervals);
+    const fallbackState = { offsetPx: 0, laneWidthPx: groupedRouteLineWidthForCount(1), groupCount: 1 };
+    for (const kept of keptRanges) {
+      const slice = buildPolylineSlicePoints(metrics, kept.start, kept.end);
+      if (slice.length < 2) continue;
+      const mid = (kept.start + kept.end) / 2;
+      const state = laneStateAtDistance(edgeStates, metrics.cumulative, mid, fallbackState);
+      const shifted = Math.abs(Number(state?.offsetPx) || 0) > 1e-6
+        ? offsetPolylinePixels(slice, Number(state.offsetPx) || 0)
+        : slice;
+      if (shifted.length < 2) continue;
+      const d = shifted.map((p, idx) => `${idx === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
+      const w = Math.max(1, Number(state?.laneWidthPx) || fallbackState.laneWidthPx);
+      routePathSvg.push(`<path d="${d}" fill="none" stroke="${seg.lineColor}" stroke-width="${w.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" />`);
     }
   }
 
   const sharedLaneSvg = [];
-  for (const chain of sharedChains) {
-    if (!chain.colors || chain.colors.length <= 1 || chain.points.length < 2) continue;
-
-    const pixelPointsRaw = chain.points.map(([lat, lon]) => {
-      const [x, y] = project(lat, lon);
-      return { x, y };
-    });
-    let pixelPoints = compactPixelPolyline(pixelPointsRaw);
-    if (SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX > 0) {
-      pixelPoints = simplifyPixelPolyline(pixelPoints, SIGN_ROUTE_GROUP_SIMPLIFY_TOLERANCE_PX);
-    }
-    if (pixelPoints.length < 2) continue;
-    const groupedWidth = groupedRouteLineWidthForCount(chain.colors.length);
-    const laneStep = Math.max(2, groupedWidth / chain.colors.length);
-    const laneWidth = Math.max(2, laneStep + SIGN_ROUTE_GROUP_LANE_OVERLAP_PX);
-
-    for (let i = 0; i < chain.colors.length; i += 1) {
-      const off = ((i - ((chain.colors.length - 1) / 2)) * laneStep);
-      let shifted = offsetPolylinePixels(pixelPoints, off);
-      if (shifted.length < 2) continue;
-      const d = shifted.map((p, idx) => `${idx === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
-      sharedLaneSvg.push(`<path d="${d}" fill="none" stroke="${chain.colors[i]}" stroke-width="${laneWidth.toFixed(2)}" stroke-linecap="butt" stroke-linejoin="round" />`);
-      const r = (laneWidth / 2).toFixed(2);
-      if (chain.roundCapStart) {
-        const s = shifted[0];
-        sharedLaneSvg.push(`<circle cx="${s.x.toFixed(2)}" cy="${s.y.toFixed(2)}" r="${r}" fill="${chain.colors[i]}" />`);
-      }
-      if (chain.roundCapEnd) {
-        const e = shifted[shifted.length - 1];
-        sharedLaneSvg.push(`<circle cx="${e.x.toFixed(2)}" cy="${e.y.toFixed(2)}" r="${r}" fill="${chain.colors[i]}" />`);
-      }
+  const transitionSvg = [];
+  for (const seg of routeSegments) {
+    const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
+    const { metrics, transitions } = transitionBySegKey.get(segKey) || {};
+    if (!metrics || !Array.isArray(transitions) || transitions.length === 0) continue;
+    for (const tr of transitions) {
+      const samples = buildTransitionSamples(metrics, tr.startDist, tr.endDist, tr.fromState, tr.toState);
+      transitionSvg.push(...buildTransitionSamplesSvg(seg.lineColor, samples));
     }
   }
 
@@ -4403,6 +4766,7 @@ async function buildSignSvg({
   </g>
   ${routePathSvg.join("")}
   ${sharedLaneSvg.join("")}
+  ${transitionSvg.join("")}
   ${routeStopsSvg.join("")}
   ${stopPt ? `<circle cx="${stopPt[0].toFixed(2)}" cy="${stopPt[1].toFixed(2)}" r="6" fill="#ffffff" stroke="#111111" stroke-width="2" />` : ""}
   ${legendSvg.join("")}
