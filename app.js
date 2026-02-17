@@ -107,15 +107,103 @@ const SIGN_VECTOR_ROAD_LABEL_HALO_WIDTH = 1.2;
 const SIGN_VECTOR_NON_ROAD_LABEL_SIZE_SCALE = 1.48;
 const SIGN_VECTOR_GL_ZOOM_OFFSET = -1;
 const SIGN_BASEMAP_OPACITY = 0.86;
-const SIGN_HEADER_HEIGHT = 180;
-const SIGN_HEADER_QR_Y = 32;
-const SIGN_HEADER_QR_SIZE = 120;
-const SIGN_HEADER_QR_FRAME_PAD = 6;
-const SIGN_HEADER_QR_EXPORT_SIZE = 512;
-const SIGN_HEADER_QR_CAPTION_LINE_HEIGHT = 16;
-const SIGN_HEADER_QR_CAPTION_LINES = [
-  "Scan for arrival times",
-];
+const SIGN_TEMPLATE = Object.freeze({
+  size: Object.freeze({
+    width: 900,
+    height: 1200,
+  }),
+  spacing: Object.freeze({
+    outerPad: 50,
+  }),
+  labels: Object.freeze({
+    title: "Bus Stop",
+    mapTitle: "Route map (from this stop onward)",
+    qrFallback: "QR",
+    qrCaptionLines: Object.freeze([
+      "Scan for arrival times",
+    ]),
+  }),
+  header: Object.freeze({
+    height: 180,
+    titleBaselineY: 80,
+    codeBaselineY: 120,
+    subtitleBaselineY: 180,
+    qrY: 32,
+    qrSize: 120,
+    qrFramePad: 6,
+    qrFrameRadius: 12,
+    qrFrameStrokeWidth: 2,
+    qrCaptionTopOffset: 20,
+    qrCaptionLineHeight: 16,
+    qrFallbackRadius: 10,
+    qrFallbackLabelYOffset: 8,
+  }),
+  map: Object.freeze({
+    sectionTopOffset: 30,
+    titleBaselineOffset: -8,
+    outerTopOffset: 6,
+    outerBottomGapFromFooter: 18,
+    outerMinHeight: 220,
+    outerRadius: 14,
+    outerFill: "#fafafa",
+    outerStroke: "#dddddd",
+    noRouteMessageXOffset: 18,
+    innerPad: 18,
+    clipRadius: 10,
+  }),
+  footer: Object.freeze({
+    baselineInset: 40,
+  }),
+  legend: Object.freeze({
+    maxItems: 6,
+    maxHeight: 220,
+    lineHeight: 16,
+    itemGap: 2,
+    startBaselineOffset: 16,
+    xInset: 14,
+    swatchWidth: 18,
+    swatchHeight: 5,
+    swatchRadius: 2,
+    swatchTopOffset: 10,
+    textGap: 8,
+    maxInlineChars: 116,
+    bottomGuard: 4,
+  }),
+  marker: Object.freeze({
+    stopRadius: 6,
+    stopStrokeWidth: 2,
+  }),
+  colors: Object.freeze({
+    title: "#111111",
+    code: "#333333",
+    subtitle: "#666666",
+    qrCaption: "#4b5563",
+    qrFallbackBg: "#eef2ff",
+    qrFallbackText: "#1e3a8a",
+    qrFrameFill: "#ffffff",
+    qrFrameStroke: "#111111",
+    mapTitle: "#111111",
+    footer: "#888888",
+    legendText: "#222222",
+    noRouteMessage: "#666666",
+    stopMarkerFill: "#ffffff",
+    stopMarkerStroke: "#111111",
+  }),
+  typography: Object.freeze({
+    family: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+    title: Object.freeze({ weight: 900, size: 56 }),
+    code: Object.freeze({ weight: 700, size: 28 }),
+    subtitle: Object.freeze({ weight: 600, size: 22 }),
+    mapTitle: Object.freeze({ weight: 800, size: 24 }),
+    qrCaption: Object.freeze({ weight: 600, size: 12 }),
+    qrFallback: Object.freeze({ weight: 900, size: 24 }),
+    footer: Object.freeze({ weight: 600, size: 16 }),
+    legendBold: Object.freeze({ weight: 700, size: 12 }),
+    legendRegular: Object.freeze({ weight: 400, size: 12 }),
+    noRouteMessage: Object.freeze({ weight: 600, size: 19 }),
+  }),
+  qrExportSize: 512,
+});
 const SIGN_ROUTE_LINE_WIDTH_RULES = [
   { minGroupCount: 5, width: 17 },
   { minGroupCount: 4, width: 15 },
@@ -275,11 +363,67 @@ function buildGoogleMapsStopUrl(stop) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
 }
 
+function signCanvasFont(fontSpec) {
+  return `${fontSpec.weight} ${fontSpec.size}px ${SIGN_TEMPLATE.typography.family}`;
+}
+
+function signSvgFontAttrs(fontSpec) {
+  return `font-size="${fontSpec.size}" font-weight="${fontSpec.weight}" font-family="${SIGN_TEMPLATE.typography.family}"`;
+}
+
+function signLegendHeight(segments) {
+  return Math.min(
+    SIGN_TEMPLATE.legend.maxHeight,
+    estimateLegendHeight(segments, SIGN_TEMPLATE.legend.maxItems),
+  );
+}
+
+function getSignLayoutGeometry({
+  width = SIGN_TEMPLATE.size.width,
+  height = SIGN_TEMPLATE.size.height,
+  legendHeight = 0,
+} = {}) {
+  const pad = SIGN_TEMPLATE.spacing.outerPad;
+  const headerHeight = SIGN_TEMPLATE.header.height;
+  const mapSectionTop = headerHeight + SIGN_TEMPLATE.map.sectionTopOffset;
+  const mapOuterY = mapSectionTop + SIGN_TEMPLATE.map.outerTopOffset;
+  const footerBaselineY = height - SIGN_TEMPLATE.footer.baselineInset;
+  const mapOuterHeight = Math.max(
+    SIGN_TEMPLATE.map.outerMinHeight,
+    (footerBaselineY - mapOuterY) - SIGN_TEMPLATE.map.outerBottomGapFromFooter,
+  );
+  const mapOuterX = pad;
+  const mapOuterWidth = width - (pad * 2);
+  const mapInnerPad = SIGN_TEMPLATE.map.innerPad;
+  return {
+    width,
+    height,
+    pad,
+    headerHeight,
+    footerBaselineY,
+    titleBaselineY: SIGN_TEMPLATE.header.titleBaselineY,
+    codeBaselineY: SIGN_TEMPLATE.header.codeBaselineY,
+    subtitleBaselineY: SIGN_TEMPLATE.header.subtitleBaselineY,
+    mapTitleBaselineY: mapSectionTop + SIGN_TEMPLATE.map.titleBaselineOffset,
+    mapOuterX,
+    mapOuterY,
+    mapOuterWidth,
+    mapOuterHeight,
+    mapInnerPad,
+    mapInnerX: mapOuterX + mapInnerPad,
+    mapInnerY: mapOuterY + mapInnerPad,
+    mapInnerWidth: mapOuterWidth - (mapInnerPad * 2),
+    mapInnerHeight: mapOuterHeight - (mapInnerPad * 2) - legendHeight,
+    qrLayout: getSignHeaderQrLayout(width, pad),
+  };
+}
+
 function getSignHeaderQrLayout(width, pad) {
-  const size = SIGN_HEADER_QR_SIZE;
+  const { qrSize, qrY, qrFramePad, qrCaptionTopOffset } = SIGN_TEMPLATE.header;
+  const size = qrSize;
   const x = width - pad - size;
-  const y = SIGN_HEADER_QR_Y;
-  const framePad = SIGN_HEADER_QR_FRAME_PAD;
+  const y = qrY;
+  const framePad = qrFramePad;
   return {
     x,
     y,
@@ -288,18 +432,31 @@ function getSignHeaderQrLayout(width, pad) {
     frameY: y - framePad,
     frameSize: size + (framePad * 2),
     captionX: x + (size / 2),
-    captionStartY: y + size + 20,
+    captionStartY: y + size + qrCaptionTopOffset,
   };
 }
 
 function drawHeaderQrFallbackOnCanvas(ctx, qrLayout) {
-  ctx.fillStyle = "#eef2ff";
-  roundRect(ctx, qrLayout.x, qrLayout.y, qrLayout.size, qrLayout.size, 10, true, false);
-  ctx.fillStyle = "#1e3a8a";
-  ctx.font = "900 24px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+  ctx.fillStyle = SIGN_TEMPLATE.colors.qrFallbackBg;
+  roundRect(
+    ctx,
+    qrLayout.x,
+    qrLayout.y,
+    qrLayout.size,
+    qrLayout.size,
+    SIGN_TEMPLATE.header.qrFallbackRadius,
+    true,
+    false,
+  );
+  ctx.fillStyle = SIGN_TEMPLATE.colors.qrFallbackText;
+  ctx.font = signCanvasFont(SIGN_TEMPLATE.typography.qrFallback);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText("QR", qrLayout.x + (qrLayout.size / 2), qrLayout.y + (qrLayout.size / 2));
+  ctx.fillText(
+    SIGN_TEMPLATE.labels.qrFallback,
+    qrLayout.x + (qrLayout.size / 2),
+    qrLayout.y + (qrLayout.size / 2) + SIGN_TEMPLATE.header.qrFallbackLabelYOffset,
+  );
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
 }
@@ -393,7 +550,7 @@ function buildQrCodeDataUrl(text, size) {
   });
 }
 
-function getStopQrCodeDataUrl(stop, size = SIGN_HEADER_QR_EXPORT_SIZE) {
+function getStopQrCodeDataUrl(stop, size = SIGN_TEMPLATE.qrExportSize) {
   const targetUrl = buildGoogleMapsStopUrl(stop);
   const cacheKey = `${size}::${targetUrl}`;
   if (headerQrCodeDataUrlCache.has(cacheKey)) return headerQrCodeDataUrlCache.get(cacheKey);
@@ -4279,24 +4436,32 @@ function makeCanvasProjector(bounds, drawX, drawY, drawW, drawH) {
 async function drawRoutePreviewOnCanvas(ctx, {
   x, y, w, h, stop, segments, renderToken, showStops = false, routeStopMarkersBySegment = null,
 }) {
+  const mapCfg = SIGN_TEMPLATE.map;
+  const legendCfg = SIGN_TEMPLATE.legend;
+  const colorCfg = SIGN_TEMPLATE.colors;
+  const typeCfg = SIGN_TEMPLATE.typography;
   const stopLat = safeParseFloat(stop.stop_lat);
   const stopLon = safeParseFloat(stop.stop_lon);
 
-  ctx.fillStyle = "#fafafa";
-  roundRect(ctx, x, y, w, h, 14, true, false);
-  ctx.strokeStyle = "#dddddd";
+  ctx.fillStyle = mapCfg.outerFill;
+  roundRect(ctx, x, y, w, h, mapCfg.outerRadius, true, false);
+  ctx.strokeStyle = mapCfg.outerStroke;
   ctx.lineWidth = 1;
-  roundRect(ctx, x, y, w, h, 14, false, true);
+  roundRect(ctx, x, y, w, h, mapCfg.outerRadius, false, true);
 
   if (segments.length === 0) {
-    ctx.fillStyle = "#666666";
-    ctx.font = "600 19px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-    ctx.fillText("No route geometry available for this stop/direction.", x + 18, y + Math.floor(h / 2));
+    ctx.fillStyle = colorCfg.noRouteMessage;
+    ctx.font = signCanvasFont(typeCfg.noRouteMessage);
+    ctx.fillText(
+      "No route geometry available for this stop/direction.",
+      x + mapCfg.noRouteMessageXOffset,
+      y + Math.floor(h / 2),
+    );
     return;
   }
 
-  const pad = 18;
-  const legendH = Math.min(220, estimateLegendHeight(segments, 6));
+  const pad = mapCfg.innerPad;
+  const legendH = signLegendHeight(segments);
   const drawX = x + pad;
   const drawY = y + pad;
   const drawW = w - (pad * 2);
@@ -4305,7 +4470,7 @@ async function drawRoutePreviewOnCanvas(ctx, {
 
   ctx.save();
   ctx.beginPath();
-  roundRect(ctx, drawX, drawY, drawW, drawH, 10, false, false);
+  roundRect(ctx, drawX, drawY, drawW, drawH, mapCfg.clipRadius, false, false);
   ctx.clip();
   await drawBasemapTilesOnCanvas(ctx, { x: drawX, y: drawY, w: drawW, h: drawH, bounds });
   ctx.restore();
@@ -4389,33 +4554,41 @@ async function drawRoutePreviewOnCanvas(ctx, {
 
   if (stopLat != null && stopLon != null) {
     const [px, py] = project(stopLat, stopLon);
-    ctx.fillStyle = "#ffffff";
-    ctx.strokeStyle = "#111111";
-    ctx.lineWidth = 2;
+    ctx.fillStyle = colorCfg.stopMarkerFill;
+    ctx.strokeStyle = colorCfg.stopMarkerStroke;
+    ctx.lineWidth = SIGN_TEMPLATE.marker.stopStrokeWidth;
     ctx.beginPath();
-    ctx.arc(px, py, 6, 0, Math.PI * 2);
+    ctx.arc(px, py, SIGN_TEMPLATE.marker.stopRadius, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
   }
 
-  const legendX = x + 14;
-  const lineH = 16;
-  const itemGap = 2;
-  let legendY = y + h - legendH + 16;
-  const legendFontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  const legendFontBold = `700 12px ${legendFontFamily}`;
-  const legendFontRegular = `400 12px ${legendFontFamily}`;
-  const legendMaxChars = 116;
-  for (const seg of segments.slice(0, 6)) {
+  const legendX = x + legendCfg.xInset;
+  const lineH = legendCfg.lineHeight;
+  const itemGap = legendCfg.itemGap;
+  let legendY = y + h - legendH + legendCfg.startBaselineOffset;
+  const legendFontBold = signCanvasFont(typeCfg.legendBold);
+  const legendFontRegular = signCanvasFont(typeCfg.legendRegular);
+  const legendMaxChars = legendCfg.maxInlineChars;
+  for (const seg of segments.slice(0, legendCfg.maxItems)) {
     const lines = buildLegendLinesForSegment(seg);
     const routeLabel = (seg.display_name || seg.route_short_name || "Route").toString().trim();
     const activeLabel = (seg.active_hours_text || "").toString().trim();
     const combined = activeLabel ? `${routeLabel} ${activeLabel}`.trim() : routeLabel;
-    const swatchW = 18;
+    const swatchW = legendCfg.swatchWidth;
     ctx.fillStyle = seg.lineColor;
-    roundRect(ctx, legendX, legendY - 10, swatchW, 5, 2, true, false);
-    ctx.fillStyle = "#222222";
-    const textX = legendX + swatchW + 8;
+    roundRect(
+      ctx,
+      legendX,
+      legendY - legendCfg.swatchTopOffset,
+      swatchW,
+      legendCfg.swatchHeight,
+      legendCfg.swatchRadius,
+      true,
+      false,
+    );
+    ctx.fillStyle = colorCfg.legendText;
+    const textX = legendX + swatchW + legendCfg.textGap;
 
     if (activeLabel && combined.length <= legendMaxChars) {
       ctx.font = legendFontBold;
@@ -4435,7 +4608,7 @@ async function drawRoutePreviewOnCanvas(ctx, {
       }
     }
     legendY += itemGap;
-    if (legendY > y + h - 4) break;
+    if (legendY > y + h - legendCfg.bottomGuard) break;
   }
 }
 
@@ -4834,11 +5007,18 @@ async function drawSign({
 }) {
   const canvas = ui.signCanvas;
   const ctx = canvas.getContext("2d");
+  const layout = getSignLayoutGeometry({
+    width: SIGN_TEMPLATE.size.width,
+    height: SIGN_TEMPLATE.size.height,
+  });
+  const colorCfg = SIGN_TEMPLATE.colors;
+  const typeCfg = SIGN_TEMPLATE.typography;
 
   const scale = Math.max(1, Math.min(3, Number(outputScale) || 1));
 
   // Logical sign size
-  const W = 900, H = 1200;
+  const W = layout.width;
+  const H = layout.height;
   canvas.width = Math.round(W * scale);
   canvas.height = Math.round(H * scale);
 
@@ -4850,24 +5030,32 @@ async function drawSign({
   ctx.fillRect(0, 0, W, H);
 
   // Header area
-  const pad = 50;
-  const headerH = SIGN_HEADER_HEIGHT;
+  const pad = layout.pad;
+  const qrLayout = layout.qrLayout;
 
-  ctx.fillStyle = "#111111";
-  ctx.font = "900 56px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  ctx.fillText("Bus Stop", pad, 80);
+  ctx.fillStyle = colorCfg.title;
+  ctx.font = signCanvasFont(typeCfg.title);
+  ctx.fillText(SIGN_TEMPLATE.labels.title, pad, layout.titleBaselineY);
 
   // Stop code / id
   const code = stop.stop_code ? `#${stop.stop_code}` : `#${stop.stop_id}`;
-  ctx.font = "700 28px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  ctx.fillStyle = "#333333";
-  ctx.fillText(code, pad, 120);
+  ctx.font = signCanvasFont(typeCfg.code);
+  ctx.fillStyle = colorCfg.code;
+  ctx.fillText(code, pad, layout.codeBaselineY);
 
-  const qrLayout = getSignHeaderQrLayout(W, pad);
-  ctx.fillStyle = "#ffffff";
-  ctx.strokeStyle = "#111111";
-  ctx.lineWidth = 2;
-  roundRect(ctx, qrLayout.frameX, qrLayout.frameY, qrLayout.frameSize, qrLayout.frameSize, 12, true, true);
+  ctx.fillStyle = colorCfg.qrFrameFill;
+  ctx.strokeStyle = colorCfg.qrFrameStroke;
+  ctx.lineWidth = SIGN_TEMPLATE.header.qrFrameStrokeWidth;
+  roundRect(
+    ctx,
+    qrLayout.frameX,
+    qrLayout.frameY,
+    qrLayout.frameSize,
+    qrLayout.frameSize,
+    SIGN_TEMPLATE.header.qrFrameRadius,
+    true,
+    true,
+  );
 
   let qrDataUrl = "";
   try {
@@ -4890,21 +5078,21 @@ async function drawSign({
     drawHeaderQrFallbackOnCanvas(ctx, qrLayout);
   }
 
-  ctx.fillStyle = "#4b5563";
-  ctx.font = "600 12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+  ctx.fillStyle = colorCfg.qrCaption;
+  ctx.font = signCanvasFont(typeCfg.qrCaption);
   ctx.textAlign = "center";
   ctx.textBaseline = "alphabetic";
-  for (let i = 0; i < SIGN_HEADER_QR_CAPTION_LINES.length; i += 1) {
-    const y = qrLayout.captionStartY + (i * SIGN_HEADER_QR_CAPTION_LINE_HEIGHT);
-    ctx.fillText(SIGN_HEADER_QR_CAPTION_LINES[i], qrLayout.captionX, y);
+  for (let i = 0; i < SIGN_TEMPLATE.labels.qrCaptionLines.length; i += 1) {
+    const y = qrLayout.captionStartY + (i * SIGN_TEMPLATE.header.qrCaptionLineHeight);
+    ctx.fillText(SIGN_TEMPLATE.labels.qrCaptionLines[i], qrLayout.captionX, y);
   }
   ctx.textAlign = "left";
 
   // Stop name / direction label
   const subtitle = `${stop.stop_name || "—"}`;
-  ctx.fillStyle = "#666666";
-  ctx.font = "600 22px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  ctx.fillText(subtitle, pad, headerH);
+  ctx.fillStyle = colorCfg.subtitle;
+  ctx.font = signCanvasFont(typeCfg.subtitle);
+  ctx.fillText(subtitle, pad, layout.subtitleBaselineY);
 
   const routeSegments = buildRouteSegmentsForStop(stop, items, maxRoutes);
   let routeStopMarkersBySegment = null;
@@ -4919,18 +5107,14 @@ async function drawSign({
   }
 
   // Route map preview (this is rendered into the PNG)
-  const mapTop = headerH + 30;
-  const mapY = mapTop + 6;
-  const footerY = H - 40;
-  const mapHeight = Math.max(220, (footerY - mapY) - 18);
-  ctx.fillStyle = "#111111";
-  ctx.font = "800 24px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  ctx.fillText("Route map (from this stop onward)", pad, mapTop - 8);
+  ctx.fillStyle = colorCfg.mapTitle;
+  ctx.font = signCanvasFont(typeCfg.mapTitle);
+  ctx.fillText(SIGN_TEMPLATE.labels.mapTitle, pad, layout.mapTitleBaselineY);
   await drawRoutePreviewOnCanvas(ctx, {
-    x: pad,
-    y: mapY,
-    w: W - (pad * 2),
-    h: mapHeight,
+    x: layout.mapOuterX,
+    y: layout.mapOuterY,
+    w: layout.mapOuterWidth,
+    h: layout.mapOuterHeight,
     stop,
     segments: routeSegments,
     renderToken,
@@ -4941,9 +5125,9 @@ async function drawSign({
   if (renderToken !== signRenderToken) return;
 
   // Footer
-  ctx.fillStyle = "#888888";
-  ctx.font = "600 16px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-  ctx.fillText(signFooterText(), pad, H - 40);
+  ctx.fillStyle = colorCfg.footer;
+  ctx.font = signCanvasFont(typeCfg.footer);
+  ctx.fillText(signFooterText(), pad, layout.footerBaselineY);
 }
 
 function escXml(s) {
@@ -4963,17 +5147,16 @@ async function buildSignSvg({
   outputScale = 1,
   showStops = false,
 }) {
+  const colorCfg = SIGN_TEMPLATE.colors;
+  const typeCfg = SIGN_TEMPLATE.typography;
+  const legendCfg = SIGN_TEMPLATE.legend;
+  const mapCfg = SIGN_TEMPLATE.map;
   const exportScale = Math.max(1, Math.min(3, Number(outputScale) || 1));
-  const svgOutW = Math.round(900 * exportScale);
-  const svgOutH = Math.round(1200 * exportScale);
+  const svgOutW = Math.round(SIGN_TEMPLATE.size.width * exportScale);
+  const svgOutH = Math.round(SIGN_TEMPLATE.size.height * exportScale);
   const svgTileRetinaSuffix = "@2x";
-  const W = 900;
-  const H = 1200;
-  const pad = 50;
-  const headerH = SIGN_HEADER_HEIGHT;
-  const mapTop = headerH + 30;
-  const mapY = mapTop + 6;
-  const footerY = H - 40;
+  const W = SIGN_TEMPLATE.size.width;
+  const H = SIGN_TEMPLATE.size.height;
 
   const routeSegments = buildRouteSegmentsForStop(stop, items, maxRoutes);
   let routeStopMarkersBySegment = null;
@@ -4985,23 +5168,17 @@ async function buildSignSvg({
       routeStopMarkersBySegment = null;
     }
   }
-  const legendH = Math.min(220, estimateLegendHeight(routeSegments, 6));
-  const mapHeight = Math.max(220, (footerY - mapY) - 18);
+  const legendH = signLegendHeight(routeSegments);
+  const layout = getSignLayoutGeometry({ width: W, height: H, legendHeight: legendH });
   const bounds = getRouteBounds(stop, routeSegments);
   const sharedEdges = buildSharedEdges(routeSegments, stop);
   const sharedChains = buildSharedLaneChains(sharedEdges);
   const sharedLaneStateByEdgeKey = buildSharedLaneStateByEdgeKey(sharedEdges);
 
-  const mapOuterX = pad;
-  const mapOuterY = mapY;
-  const mapOuterW = W - (pad * 2);
-  const mapOuterH = mapHeight;
-  const mapInnerPad = 18;
-  const legendHForMap = legendH;
-  const drawX = mapOuterX + mapInnerPad;
-  const drawY = mapOuterY + mapInnerPad;
-  const drawW = mapOuterW - (mapInnerPad * 2);
-  const drawH = mapOuterH - (mapInnerPad * 2) - legendHForMap;
+  const drawX = layout.mapInnerX;
+  const drawY = layout.mapInnerY;
+  const drawW = layout.mapInnerWidth;
+  const drawH = layout.mapInnerHeight;
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
   const sharedLaneByRouteId = buildSharedLanePlacementData(
     sharedChains,
@@ -5031,20 +5208,20 @@ async function buildSignSvg({
   const stopPt = (stopLat != null && stopLon != null) ? project(stopLat, stopLon) : null;
   const subtitle = `${stop.stop_name || "—"}`;
   const code = stop.stop_code ? `#${stop.stop_code}` : `#${stop.stop_id}`;
-  const qrLayout = getSignHeaderQrLayout(W, pad);
+  const qrLayout = layout.qrLayout;
   let qrDataUrl = "";
   try {
     qrDataUrl = await getStopQrCodeDataUrl(stop);
   } catch (err) {
     console.warn("Failed to generate stop QR code for SVG export.", err);
   }
-  const qrCaptionSvg = SIGN_HEADER_QR_CAPTION_LINES.map((line, idx) => {
-    const y = qrLayout.captionStartY + (idx * SIGN_HEADER_QR_CAPTION_LINE_HEIGHT);
-    return `<text x="${qrLayout.captionX.toFixed(2)}" y="${y.toFixed(2)}" text-anchor="middle" fill="#4b5563" font-size="12" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(line)}</text>`;
+  const qrCaptionSvg = SIGN_TEMPLATE.labels.qrCaptionLines.map((line, idx) => {
+    const y = qrLayout.captionStartY + (idx * SIGN_TEMPLATE.header.qrCaptionLineHeight);
+    return `<text x="${qrLayout.captionX.toFixed(2)}" y="${y.toFixed(2)}" text-anchor="middle" fill="${colorCfg.qrCaption}" ${signSvgFontAttrs(typeCfg.qrCaption)}>${escXml(line)}</text>`;
   }).join("");
   const qrImageSvg = qrDataUrl
     ? `<image href="${qrDataUrl}" x="${qrLayout.x.toFixed(2)}" y="${qrLayout.y.toFixed(2)}" width="${qrLayout.size.toFixed(2)}" height="${qrLayout.size.toFixed(2)}" />`
-    : `<g><rect x="${qrLayout.x.toFixed(2)}" y="${qrLayout.y.toFixed(2)}" width="${qrLayout.size.toFixed(2)}" height="${qrLayout.size.toFixed(2)}" rx="10" fill="#eef2ff" /><text x="${qrLayout.captionX.toFixed(2)}" y="${(qrLayout.y + (qrLayout.size / 2) + 8).toFixed(2)}" text-anchor="middle" fill="#1e3a8a" font-size="24" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">QR</text></g>`;
+    : `<g><rect x="${qrLayout.x.toFixed(2)}" y="${qrLayout.y.toFixed(2)}" width="${qrLayout.size.toFixed(2)}" height="${qrLayout.size.toFixed(2)}" rx="${SIGN_TEMPLATE.header.qrFallbackRadius}" fill="${colorCfg.qrFallbackBg}" /><text x="${qrLayout.captionX.toFixed(2)}" y="${(qrLayout.y + (qrLayout.size / 2) + SIGN_TEMPLATE.header.qrFallbackLabelYOffset).toFixed(2)}" text-anchor="middle" fill="${colorCfg.qrFallbackText}" ${signSvgFontAttrs(typeCfg.qrFallback)}>${escXml(SIGN_TEMPLATE.labels.qrFallback)}</text></g>`;
 
   const mapClipId = "mapClip";
   const mapTileSvg = [];
@@ -5127,63 +5304,63 @@ async function buildSignSvg({
         const markerStyle = stopMarkerStyleForLineWidth(pos.laneWidthPx);
         const px = pos.x;
         const py = pos.y;
-        routeStopsSvg.push(`<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="${markerStyle.radius.toFixed(2)}" fill="${seg.lineColor}" stroke="#ffffff" stroke-width="${markerStyle.strokeWidth.toFixed(2)}" />`);
+        routeStopsSvg.push(`<circle cx="${px.toFixed(2)}" cy="${py.toFixed(2)}" r="${markerStyle.radius.toFixed(2)}" fill="${seg.lineColor}" stroke="${colorCfg.stopMarkerFill}" stroke-width="${markerStyle.strokeWidth.toFixed(2)}" />`);
       }
     }
   }
 
   const legendSvg = [];
-  const legendX = mapOuterX + 14;
-  const lineH = 16;
-  const itemGap = 2;
-  let legendY = mapOuterY + mapOuterH - legendHForMap + 16;
-  const legendMaxChars = 116;
-  for (const seg of routeSegments.slice(0, 6)) {
+  const legendX = layout.mapOuterX + legendCfg.xInset;
+  const lineH = legendCfg.lineHeight;
+  const itemGap = legendCfg.itemGap;
+  let legendY = layout.mapOuterY + layout.mapOuterHeight - legendH + legendCfg.startBaselineOffset;
+  const legendMaxChars = legendCfg.maxInlineChars;
+  for (const seg of routeSegments.slice(0, legendCfg.maxItems)) {
     const lines = buildLegendLinesForSegment(seg);
     const routeLabel = (seg.display_name || seg.route_short_name || "Route").toString().trim();
     const activeLabel = (seg.active_hours_text || "").toString().trim();
     const combined = activeLabel ? `${routeLabel} ${activeLabel}`.trim() : routeLabel;
-    const textX = legendX + 26;
-    legendSvg.push(`<rect x="${legendX.toFixed(2)}" y="${(legendY - 10).toFixed(2)}" width="18" height="5" rx="2" fill="${seg.lineColor}" />`);
+    const textX = legendX + legendCfg.swatchWidth + legendCfg.textGap;
+    legendSvg.push(`<rect x="${legendX.toFixed(2)}" y="${(legendY - legendCfg.swatchTopOffset).toFixed(2)}" width="${legendCfg.swatchWidth}" height="${legendCfg.swatchHeight}" rx="${legendCfg.swatchRadius}" fill="${seg.lineColor}" />`);
     if (activeLabel && combined.length <= legendMaxChars) {
-      legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial"><tspan font-weight="700">${escXml(routeLabel)}</tspan><tspan font-weight="400"> ${escXml(activeLabel)}</tspan></text>`);
+      legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="${colorCfg.legendText}" ${signSvgFontAttrs(typeCfg.legendRegular)}><tspan font-weight="${typeCfg.legendBold.weight}">${escXml(routeLabel)}</tspan><tspan font-weight="${typeCfg.legendRegular.weight}"> ${escXml(activeLabel)}</tspan></text>`);
       legendY += lineH;
     } else {
-      legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(lines[0] || routeLabel)}</text>`);
+      legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="${colorCfg.legendText}" ${signSvgFontAttrs(typeCfg.legendBold)}>${escXml(lines[0] || routeLabel)}</text>`);
       legendY += lineH;
       for (let i = 1; i < lines.length; i += 1) {
-        legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="#222222" font-size="12" font-weight="400" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(lines[i])}</text>`);
+        legendSvg.push(`<text x="${textX.toFixed(2)}" y="${legendY.toFixed(2)}" fill="${colorCfg.legendText}" ${signSvgFontAttrs(typeCfg.legendRegular)}>${escXml(lines[i])}</text>`);
         legendY += lineH;
       }
     }
     legendY += itemGap;
-    if (legendY > mapOuterY + mapOuterH - 4) break;
+    if (legendY > layout.mapOuterY + layout.mapOuterHeight - legendCfg.bottomGuard) break;
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgOutW}" height="${svgOutH}" viewBox="0 0 ${W} ${H}">
   <defs>
     <clipPath id="${mapClipId}">
-      <rect x="${drawX.toFixed(2)}" y="${drawY.toFixed(2)}" width="${drawW.toFixed(2)}" height="${drawH.toFixed(2)}" rx="10" />
+      <rect x="${drawX.toFixed(2)}" y="${drawY.toFixed(2)}" width="${drawW.toFixed(2)}" height="${drawH.toFixed(2)}" rx="${mapCfg.clipRadius}" />
     </clipPath>
   </defs>
   <rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />
-  <text x="${pad}" y="80" fill="#111111" font-size="56" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Bus Stop</text>
-  <text x="${pad}" y="120" fill="#333333" font-size="28" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(code)}</text>
-  <rect x="${qrLayout.frameX.toFixed(2)}" y="${qrLayout.frameY.toFixed(2)}" width="${qrLayout.frameSize.toFixed(2)}" height="${qrLayout.frameSize.toFixed(2)}" rx="12" fill="#ffffff" stroke="#111111" stroke-width="2" />
+  <text x="${layout.pad}" y="${layout.titleBaselineY}" fill="${colorCfg.title}" ${signSvgFontAttrs(typeCfg.title)}>${escXml(SIGN_TEMPLATE.labels.title)}</text>
+  <text x="${layout.pad}" y="${layout.codeBaselineY}" fill="${colorCfg.code}" ${signSvgFontAttrs(typeCfg.code)}>${escXml(code)}</text>
+  <rect x="${qrLayout.frameX.toFixed(2)}" y="${qrLayout.frameY.toFixed(2)}" width="${qrLayout.frameSize.toFixed(2)}" height="${qrLayout.frameSize.toFixed(2)}" rx="${SIGN_TEMPLATE.header.qrFrameRadius}" fill="${colorCfg.qrFrameFill}" stroke="${colorCfg.qrFrameStroke}" stroke-width="${SIGN_TEMPLATE.header.qrFrameStrokeWidth}" />
   ${qrImageSvg}
   ${qrCaptionSvg}
-  <text x="${pad}" y="${headerH}" fill="#666666" font-size="22" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(subtitle)}</text>
-  <text x="${pad}" y="${mapTop - 8}" fill="#111111" font-size="24" font-weight="800" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Route map (from this stop onward)</text>
-  <rect x="${mapOuterX}" y="${mapOuterY}" width="${mapOuterW}" height="${mapOuterH}" rx="14" fill="#fafafa" stroke="#dddddd" />
+  <text x="${layout.pad}" y="${layout.subtitleBaselineY}" fill="${colorCfg.subtitle}" ${signSvgFontAttrs(typeCfg.subtitle)}>${escXml(subtitle)}</text>
+  <text x="${layout.pad}" y="${layout.mapTitleBaselineY}" fill="${colorCfg.mapTitle}" ${signSvgFontAttrs(typeCfg.mapTitle)}>${escXml(SIGN_TEMPLATE.labels.mapTitle)}</text>
+  <rect x="${layout.mapOuterX}" y="${layout.mapOuterY}" width="${layout.mapOuterWidth}" height="${layout.mapOuterHeight}" rx="${mapCfg.outerRadius}" fill="${mapCfg.outerFill}" stroke="${mapCfg.outerStroke}" />
   <g clip-path="url(#${mapClipId})">
     ${mapTileSvg.join("")}
   </g>
   ${routePathSvg.join("")}
   ${routeStopsSvg.join("")}
-  ${stopPt ? `<circle cx="${stopPt[0].toFixed(2)}" cy="${stopPt[1].toFixed(2)}" r="6" fill="#ffffff" stroke="#111111" stroke-width="2" />` : ""}
+  ${stopPt ? `<circle cx="${stopPt[0].toFixed(2)}" cy="${stopPt[1].toFixed(2)}" r="${SIGN_TEMPLATE.marker.stopRadius}" fill="${colorCfg.stopMarkerFill}" stroke="${colorCfg.stopMarkerStroke}" stroke-width="${SIGN_TEMPLATE.marker.stopStrokeWidth}" />` : ""}
   ${legendSvg.join("")}
-  <text x="${pad}" y="${H - 40}" fill="#888888" font-size="16" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(signFooterText())}</text>
+  <text x="${layout.pad}" y="${layout.footerBaselineY}" fill="${colorCfg.footer}" ${signSvgFontAttrs(typeCfg.footer)}>${escXml(signFooterText())}</text>
 </svg>`;
 }
 
@@ -5266,19 +5443,14 @@ function openStop(stop) {
   const overlapOrder = [];
   buildSharedEdges(debugSegments, stop, { traceOut: overlapEvents, traceOrderOut: overlapOrder });
 
-  const signW = 900;
-  const signH = 1200;
-  const signPad = 50;
-  const headerH = SIGN_HEADER_HEIGHT;
-  const mapTop = headerH + 30;
-  const mapY = mapTop + 6;
-  const footerY = signH - 40;
-  const mapOuterH = Math.max(220, (footerY - mapY) - 18);
-  const mapOuterW = signW - (signPad * 2);
-  const mapInnerPad = 18;
-  const legendH = Math.min(220, estimateLegendHeight(debugSegments, 6));
-  const drawW = mapOuterW - (mapInnerPad * 2);
-  const drawH = mapOuterH - (mapInnerPad * 2) - legendH;
+  const legendH = signLegendHeight(debugSegments);
+  const signLayout = getSignLayoutGeometry({
+    width: SIGN_TEMPLATE.size.width,
+    height: SIGN_TEMPLATE.size.height,
+    legendHeight: legendH,
+  });
+  const drawW = signLayout.mapInnerWidth;
+  const drawH = signLayout.mapInnerHeight;
   const bounds = getRouteBounds(stop, debugSegments);
   const signMapView = computeSignMapViewWindow(bounds, drawW, drawH, 0);
   const rasterFallbackView = computeSignMapViewWindow(bounds, drawW, drawH, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
@@ -5301,8 +5473,8 @@ function openStop(stop) {
       width: drawW,
       height: drawH,
       legend_height: legendH,
-      map_outer_width: mapOuterW,
-      map_outer_height: mapOuterH,
+      map_outer_width: signLayout.mapOuterWidth,
+      map_outer_height: signLayout.mapOuterHeight,
     },
     zoom: {
       projection_render_zoom: signMapView.renderZoom,
