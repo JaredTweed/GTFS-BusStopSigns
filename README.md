@@ -25,4 +25,4 @@ I heard that the largest reason for poor signage is due to the frequency of how 
 
 Paste `python3 -m http.server 8000` into the terminal from this folder then open `http://localhost:8000/` in your web browser. 
 
-Run `./update_example_pngs.sh` to update the examples in `README.md`. Run `./update_preload.sh` to update the preloaded route summaries so that it loads faster (this is automated for the website to ensure everything is up to date).
+On Linux (and other Unix-like environments with the required tooling), run `./update_example_pngs.sh` to update the examples in `README.md`. Run `./update_preload.sh` to update the preloaded route summaries so that it loads faster (this is automated for the website to ensure everything is up to date).
