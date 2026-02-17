@@ -215,7 +215,9 @@ const SIGN_TEMPLATE = Object.freeze({
   qrExportSize: 512,
 });
 const SIGN_ROUTE_LINE_WIDTH_RULES = [
-  { minGroupCount: 5, width: 17 },
+  { minGroupCount: 7, width: 30 },
+  { minGroupCount: 6, width: 25 },
+  { minGroupCount: 5, width: 20 },
   { minGroupCount: 4, width: 15 },
   { minGroupCount: 3, width: 13 },
   { minGroupCount: 2, width: 10 },
