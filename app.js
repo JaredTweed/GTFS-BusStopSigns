@@ -36,6 +36,11 @@ const ui = {
   downloadBtn: el("downloadBtn"),
   copyBtn: el("copyBtn"),
   downloadSvgBtn: el("downloadSvgBtn"),
+  massSelectRegionBtn: el("massSelectRegionBtn"),
+  massDownloadFormat: el("massDownloadFormat"),
+  massDownloadBtn: el("massDownloadBtn"),
+  massSelectionCount: el("massSelectionCount"),
+  massDownloadStatus: el("massDownloadStatus"),
   showStopsToggle: el("showStopsToggle"),
   showStopsToggleLabel: el("showStopsToggleLabel"),
   modalBody: el("modalBody"),
@@ -262,6 +267,10 @@ const DIRECTION_PREFIX_BY_WORD = new Map([
 const PREVIEW_ZOOM_MIN = 1;
 const PREVIEW_ZOOM_MAX = 5;
 const PREVIEW_ZOOM_STEP = 1.12;
+const EXPORT_RENDER_SETTLE_MS = 300;
+const EXPORT_STABILIZE_PAUSE_MS = 700;
+const EXPORT_MAX_RENDER_ATTEMPTS = 8;
+const MASS_SELECT_DRAG_MIN_PX = 8;
 let previewZoomScale = 1;
 let previewZoomOriginX = 50;
 let previewZoomOriginY = 50;
@@ -274,6 +283,14 @@ let signVectorRoadLabelLastFactor = null;
 let progressTargetPct = 0;
 let progressRenderedPct = 0;
 let progressAnimationFrame = 0;
+let exportJobInProgress = false;
+let massSelectionMode = false;
+let massSelectionDragState = null;
+let massSelectionOverlay = null;
+let massSelectionRectEl = null;
+let massSelectionLayer = null;
+let massSelectionBounds = null;
+let massSelectedStops = [];
 
 function isCoarsePointerDevice() {
   if (typeof window === "undefined") return false;
@@ -372,6 +389,132 @@ function niceInt(x) {
 function safeParseFloat(x) {
   const v = Number.parseFloat(x);
   return Number.isFinite(v) ? v : null;
+}
+
+function waitMs(ms) {
+  const delay = Math.max(0, Number(ms) || 0);
+  if (delay <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+function sanitizeFilenamePart(raw, maxLen = 80) {
+  const cleaned = String(raw ?? "")
+    .trim()
+    .replace(/[^\w\-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!cleaned) return "stop";
+  return cleaned.slice(0, maxLen);
+}
+
+function stopCodeOrId(stop) {
+  const code = String(stop?.stop_code || "").trim();
+  if (code) return code;
+  const stopId = String(stop?.stop_id || "").trim();
+  return stopId || "stop";
+}
+
+function buildStopExportBaseName(stop) {
+  return `#${sanitizeFilenamePart(stopCodeOrId(stop), 40)}`;
+}
+
+function buildStopExportFilename(stop, format) {
+  const ext = format === "svg" ? "svg" : "png";
+  return `${buildStopExportBaseName(stop)}.${ext}`;
+}
+
+function buildMassZipFilename(format, stopCount) {
+  const date = new Date().toISOString().slice(0, 10);
+  const ext = format === "svg" ? "svg" : "png";
+  const count = Math.max(0, Number(stopCount) || 0);
+  return `bus_stops_${date}_${ext}_${count}.zip`;
+}
+
+function stopDisplayLabel(stop) {
+  const code = stopCodeOrId(stop);
+  const name = String(stop?.stop_name || "").trim();
+  return name ? `${code} (${name})` : code;
+}
+
+function uniqueFilename(baseName, usedNames) {
+  if (!(usedNames instanceof Set)) return baseName;
+  if (!usedNames.has(baseName)) {
+    usedNames.add(baseName);
+    return baseName;
+  }
+  const dot = baseName.lastIndexOf(".");
+  const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
+  const ext = dot > 0 ? baseName.slice(dot) : "";
+  let n = 2;
+  while (true) {
+    const candidate = `${stem}_${n}${ext}`;
+    if (!usedNames.has(candidate)) {
+      usedNames.add(candidate);
+      return candidate;
+    }
+    n += 1;
+  }
+}
+
+function triggerBlobDownload(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.download = filename;
+    a.href = url;
+    a.click();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+}
+
+function triggerDataUrlDownload(filename, dataUrl) {
+  const a = document.createElement("a");
+  a.download = filename;
+  a.href = dataUrl;
+  a.click();
+}
+
+function pngDataUrlToBase64(dataUrl) {
+  return String(dataUrl || "").replace(/^data:image\/png;base64,/, "");
+}
+
+function setMassDownloadStatus(text) {
+  if (ui.massDownloadStatus) ui.massDownloadStatus.textContent = String(text || "");
+}
+
+function updateMassSelectionCountText() {
+  if (!ui.massSelectionCount) return;
+  if (massSelectionMode) {
+    ui.massSelectionCount.textContent = "Drag a region on the map.";
+    return;
+  }
+  if (massSelectedStops.length > 0) {
+    ui.massSelectionCount.textContent = `${niceInt(massSelectedStops.length)} stop${massSelectedStops.length === 1 ? "" : "s"} selected.`;
+    return;
+  }
+  ui.massSelectionCount.textContent = "No region selected.";
+}
+
+function updateMassDownloadUi() {
+  updateMassSelectionCountText();
+  if (ui.massSelectRegionBtn) {
+    ui.massSelectRegionBtn.disabled = exportJobInProgress;
+    ui.massSelectRegionBtn.textContent = massSelectionMode ? "Selecting…" : "Select Region";
+  }
+  if (ui.massDownloadFormat) ui.massDownloadFormat.disabled = exportJobInProgress;
+  if (ui.massDownloadBtn) {
+    ui.massDownloadBtn.disabled = exportJobInProgress || massSelectionMode || massSelectedStops.length === 0;
+  }
+}
+
+function setExportJobInProgress(next) {
+  exportJobInProgress = !!next;
+  if (ui.downloadBtn) ui.downloadBtn.disabled = exportJobInProgress;
+  if (ui.downloadSvgBtn) ui.downloadSvgBtn.disabled = exportJobInProgress;
+  if (ui.copyBtn) ui.copyBtn.disabled = exportJobInProgress;
+  if (ui.showStopsToggle) ui.showStopsToggle.disabled = exportJobInProgress;
+  updateMassDownloadUi();
 }
 
 function buildGoogleMapsStopQueryName(stopNameRaw) {
@@ -1372,6 +1515,8 @@ function initMap() {
     maxClusterRadius: 55,
   });
   map.addLayer(markerCluster);
+  ensureMassSelectionOverlay();
+  updateMassDownloadUi();
 }
 
 function addStopsToMap() {
@@ -1394,6 +1539,242 @@ function addStopsToMap() {
     m.on("click", () => openStop(s));
     markerCluster.addLayer(m);
   }
+
+  if (massSelectionBounds) {
+    massSelectedStops = collectStopsInBounds(massSelectionBounds);
+    updateMassDownloadUi();
+  }
+}
+
+function ensureMassSelectionOverlay() {
+  if (!map) return;
+  if (massSelectionOverlay && massSelectionOverlay.isConnected) return;
+  const container = map.getContainer();
+  if (!container) return;
+
+  const overlay = document.createElement("div");
+  overlay.id = "massSelectionOverlay";
+  overlay.innerHTML = `
+    <div class="massSelectionOverlay__hint">Drag to select bus stops</div>
+    <div class="massSelectionOverlay__rect"></div>
+  `;
+  container.appendChild(overlay);
+  massSelectionOverlay = overlay;
+  massSelectionRectEl = overlay.querySelector(".massSelectionOverlay__rect");
+
+  overlay.addEventListener("pointerdown", onMassSelectionPointerDown);
+  overlay.addEventListener("pointermove", onMassSelectionPointerMove);
+  overlay.addEventListener("pointerup", onMassSelectionPointerUp);
+  overlay.addEventListener("pointercancel", onMassSelectionPointerCancel);
+}
+
+function overlayPointFromPointerEvent(ev) {
+  if (!massSelectionOverlay) return null;
+  const rect = massSelectionOverlay.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+  return {
+    x: Math.max(0, Math.min(rect.width, ev.clientX - rect.left)),
+    y: Math.max(0, Math.min(rect.height, ev.clientY - rect.top)),
+  };
+}
+
+function selectionRectFromState(state) {
+  const left = Math.min(state.startX, state.currentX);
+  const top = Math.min(state.startY, state.currentY);
+  const width = Math.abs(state.currentX - state.startX);
+  const height = Math.abs(state.currentY - state.startY);
+  return {
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+  };
+}
+
+function renderMassSelectionRect() {
+  if (!massSelectionRectEl) return;
+  if (!massSelectionDragState) {
+    massSelectionRectEl.style.display = "none";
+    return;
+  }
+  const rect = selectionRectFromState(massSelectionDragState);
+  massSelectionRectEl.style.display = "block";
+  massSelectionRectEl.style.left = `${rect.left}px`;
+  massSelectionRectEl.style.top = `${rect.top}px`;
+  massSelectionRectEl.style.width = `${rect.width}px`;
+  massSelectionRectEl.style.height = `${rect.height}px`;
+}
+
+function endMassSelectionDragVisual() {
+  massSelectionDragState = null;
+  renderMassSelectionRect();
+}
+
+function setMassSelectionMode(next) {
+  const enabled = !!next;
+  massSelectionMode = enabled;
+  ensureMassSelectionOverlay();
+  if (massSelectionOverlay) {
+    massSelectionOverlay.classList.toggle("active", enabled);
+  }
+  if (!enabled) {
+    endMassSelectionDragVisual();
+  } else {
+    setMassDownloadStatus("Drag a rectangle on the map to choose stops.");
+  }
+  updateMassDownloadUi();
+}
+
+function clearMassSelection() {
+  massSelectionBounds = null;
+  massSelectedStops = [];
+  if (massSelectionLayer && map) {
+    map.removeLayer(massSelectionLayer);
+    massSelectionLayer = null;
+  }
+  updateMassDownloadUi();
+}
+
+function stopSortKey(stop) {
+  return stopCodeOrId(stop);
+}
+
+function compareStopsForExport(a, b) {
+  const ak = stopSortKey(a);
+  const bk = stopSortKey(b);
+  const an = Number.parseInt(ak, 10);
+  const bn = Number.parseInt(bk, 10);
+  const aNum = Number.isFinite(an);
+  const bNum = Number.isFinite(bn);
+  if (aNum && bNum && an !== bn) return an - bn;
+  if (aNum !== bNum) return aNum ? -1 : 1;
+  if (ak !== bk) return ak.localeCompare(bk);
+  const aname = String(a?.stop_name || "");
+  const bname = String(b?.stop_name || "");
+  return aname.localeCompare(bname);
+}
+
+function collectStopsInBounds(bounds) {
+  if (!bounds) return [];
+  const south = bounds.getSouth();
+  const north = bounds.getNorth();
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  const crossesDateLine = west > east;
+
+  const inLonRange = (lon) => {
+    if (crossesDateLine) return lon >= west || lon <= east;
+    return lon >= west && lon <= east;
+  };
+
+  return stops
+    .filter((s) => {
+      const lat = safeParseFloat(s?.stop_lat);
+      const lon = safeParseFloat(s?.stop_lon);
+      if (lat == null || lon == null) return false;
+      return lat >= south && lat <= north && inLonRange(lon);
+    })
+    .sort(compareStopsForExport);
+}
+
+function applyMassSelectionBounds(bounds) {
+  massSelectionBounds = bounds || null;
+  if (!map) return;
+
+  if (!massSelectionBounds) {
+    clearMassSelection();
+    return;
+  }
+
+  if (!massSelectionLayer) {
+    massSelectionLayer = L.rectangle(massSelectionBounds, {
+      color: "#2b6dff",
+      weight: 2,
+      fillOpacity: 0.06,
+      interactive: false,
+    }).addTo(map);
+  } else {
+    massSelectionLayer.setBounds(massSelectionBounds);
+  }
+
+  massSelectedStops = collectStopsInBounds(massSelectionBounds);
+  updateMassDownloadUi();
+}
+
+function finalizeMassSelectionFromDragState() {
+  if (!map || !massSelectionDragState) return;
+  const rect = selectionRectFromState(massSelectionDragState);
+  const dragDistance = Math.max(rect.width, rect.height);
+  if (dragDistance < MASS_SELECT_DRAG_MIN_PX) {
+    setMassDownloadStatus("Selection was too small. Drag a larger region.");
+    return;
+  }
+
+  const nw = map.containerPointToLatLng([rect.left, rect.top]);
+  const se = map.containerPointToLatLng([rect.right, rect.bottom]);
+  const bounds = L.latLngBounds(nw, se);
+  applyMassSelectionBounds(bounds);
+
+  if (massSelectedStops.length === 0) {
+    setMassDownloadStatus("No stops found in that region. Try a larger selection.");
+  } else {
+    setMassDownloadStatus(`${niceInt(massSelectedStops.length)} stop${massSelectedStops.length === 1 ? "" : "s"} selected. Choose PNG or SVG, then download.`);
+  }
+  setMassSelectionMode(false);
+}
+
+function onMassSelectionPointerDown(ev) {
+  if (!massSelectionMode || exportJobInProgress || !massSelectionOverlay) return;
+  const pt = overlayPointFromPointerEvent(ev);
+  if (!pt) return;
+  ev.preventDefault();
+  massSelectionDragState = {
+    pointerId: ev.pointerId,
+    startX: pt.x,
+    startY: pt.y,
+    currentX: pt.x,
+    currentY: pt.y,
+  };
+  massSelectionOverlay.setPointerCapture(ev.pointerId);
+  renderMassSelectionRect();
+}
+
+function onMassSelectionPointerMove(ev) {
+  if (!massSelectionMode || !massSelectionDragState) return;
+  if (ev.pointerId !== massSelectionDragState.pointerId) return;
+  const pt = overlayPointFromPointerEvent(ev);
+  if (!pt) return;
+  ev.preventDefault();
+  massSelectionDragState.currentX = pt.x;
+  massSelectionDragState.currentY = pt.y;
+  renderMassSelectionRect();
+}
+
+function onMassSelectionPointerUp(ev) {
+  if (!massSelectionMode || !massSelectionDragState) return;
+  if (ev.pointerId !== massSelectionDragState.pointerId) return;
+  const pt = overlayPointFromPointerEvent(ev);
+  if (pt) {
+    massSelectionDragState.currentX = pt.x;
+    massSelectionDragState.currentY = pt.y;
+  }
+  if (massSelectionOverlay?.hasPointerCapture(ev.pointerId)) {
+    massSelectionOverlay.releasePointerCapture(ev.pointerId);
+  }
+  finalizeMassSelectionFromDragState();
+  endMassSelectionDragVisual();
+}
+
+function onMassSelectionPointerCancel(ev) {
+  if (!massSelectionMode || !massSelectionDragState) return;
+  if (ev.pointerId !== massSelectionDragState.pointerId) return;
+  if (massSelectionOverlay?.hasPointerCapture(ev.pointerId)) {
+    massSelectionOverlay.releasePointerCapture(ev.pointerId);
+  }
+  endMassSelectionDragVisual();
+  setMassDownloadStatus("Selection canceled.");
 }
 
 function openModal() {
@@ -1415,7 +1796,7 @@ function closeModal() {
 ui.modalBackdrop.addEventListener("click", closeModal);
 ui.closeModal.addEventListener("click", closeModal);
 ui.signWrap?.addEventListener("wheel", onSignPreviewWheel, { passive: false });
-window.addEventListener("keydown", onQrUrlModeHotkey);
+window.addEventListener("keydown", onGlobalKeyDown);
 
 function normalizeColor(hex, fallback="#333333") {
   if (!hex) return fallback;
@@ -5455,6 +5836,7 @@ function isEditableElementTarget(target) {
 }
 
 function toggleQrUrlMode() {
+  if (exportJobInProgress) return;
   useCenteredQrMapUrl = !useCenteredQrMapUrl;
   console.log(`QR URL mode: ${useCenteredQrMapUrl ? "Centered" : "Plain api=1"} (Ctrl+Shift+Y to toggle)`);
   rerenderSelectedStopSign();
@@ -5468,7 +5850,20 @@ function onQrUrlModeHotkey(ev) {
   toggleQrUrlMode();
 }
 
+function onGlobalKeyDown(ev) {
+  if (ev.code === "Escape" && massSelectionMode) {
+    if (!isEditableElementTarget(ev.target)) {
+      ev.preventDefault();
+      setMassSelectionMode(false);
+      setMassDownloadStatus("Selection canceled.");
+    }
+    return;
+  }
+  onQrUrlModeHotkey(ev);
+}
+
 function openStop(stop) {
+  if (exportJobInProgress || massSelectionMode) return;
   selectedStop = stop;
   resetPreviewZoom();
   syncShowStopsToggleUi();
@@ -5563,79 +5958,230 @@ function openStop(stop) {
   rerenderSelectedStopSign();
 }
 
-ui.downloadBtn.addEventListener("click", async () => {
-  const stop = selectedStop;
-  if (!stop) return;
-
-  const canvas = ui.signCanvas;
-  const name = (stop.stop_name || "bus_stop").toString().replace(/[^\w\-]+/g, "_").slice(0, 50);
-  const code = (stop.stop_code || stop.stop_id || "").toString().replace(/[^\w\-]+/g, "_").slice(0, 30);
+function stopExportContext(stop) {
   const directionFilter = FIXED_DIRECTION_FILTER;
-  const maxRoutes = Math.max(0, getRouteSummaryForStop(stop, directionFilter).length);
-  const outputScale = FIXED_EXPORT_SCALE;
-  const filename = `${name}_${code}_dir-${directionFilter}_png-${outputScale}x.png`;
+  const items = getRouteSummaryForStop(stop, directionFilter);
+  return {
+    directionFilter,
+    items,
+    maxRoutes: Math.max(0, items.length),
+    outputScale: FIXED_EXPORT_SCALE,
+    showStops: showStopsOnSign,
+  };
+}
 
-  try {
+async function renderStablePngDataUrl(stop, context = null) {
+  const exportContext = context || stopExportContext(stop);
+  let previousDataUrl = "";
+
+  for (let attempt = 1; attempt <= EXPORT_MAX_RENDER_ATTEMPTS; attempt += 1) {
     const renderToken = ++signRenderToken;
-    const items = getRouteSummaryForStop(stop, directionFilter);
     await drawSign({
       stop,
-      items,
-      directionFilter,
-      maxRoutes,
+      items: exportContext.items,
+      directionFilter: exportContext.directionFilter,
+      maxRoutes: exportContext.maxRoutes,
       renderToken,
-      outputScale,
-      showStops: showStopsOnSign,
+      outputScale: exportContext.outputScale,
+      showStops: exportContext.showStops,
     });
-    if (renderToken !== signRenderToken) return;
+    if (renderToken !== signRenderToken) {
+      throw new Error(`Render for ${stopDisplayLabel(stop)} was superseded.`);
+    }
 
-    const a = document.createElement("a");
-    a.download = filename;
-    a.href = canvas.toDataURL("image/png");
-    a.click();
+    await waitMs(EXPORT_RENDER_SETTLE_MS);
+    const currentDataUrl = ui.signCanvas.toDataURL("image/png");
+    if (previousDataUrl && currentDataUrl === previousDataUrl) {
+      return { dataUrl: currentDataUrl, attempts: attempt };
+    }
+    previousDataUrl = currentDataUrl;
+    if (attempt < EXPORT_MAX_RENDER_ATTEMPTS) {
+      await waitMs(EXPORT_STABILIZE_PAUSE_MS);
+    }
+  }
+
+  throw new Error(
+    `PNG render for ${stopDisplayLabel(stop)} did not stabilize after ${EXPORT_MAX_RENDER_ATTEMPTS} attempts.`,
+  );
+}
+
+async function renderStableSvgMarkup(stop, context = null) {
+  const exportContext = context || stopExportContext(stop);
+  let previousSvg = "";
+
+  for (let attempt = 1; attempt <= EXPORT_MAX_RENDER_ATTEMPTS; attempt += 1) {
+    const currentSvg = await buildSignSvg({
+      stop,
+      items: exportContext.items,
+      directionFilter: exportContext.directionFilter,
+      maxRoutes: exportContext.maxRoutes,
+      outputScale: exportContext.outputScale,
+      showStops: exportContext.showStops,
+    });
+    if (previousSvg && currentSvg === previousSvg) {
+      return { svg: currentSvg, attempts: attempt };
+    }
+    previousSvg = currentSvg;
+    if (attempt < EXPORT_MAX_RENDER_ATTEMPTS) {
+      await waitMs(EXPORT_STABILIZE_PAUSE_MS);
+    }
+  }
+
+  throw new Error(
+    `SVG render for ${stopDisplayLabel(stop)} did not stabilize after ${EXPORT_MAX_RENDER_ATTEMPTS} attempts.`,
+  );
+}
+
+async function downloadSelectedStopAsPng() {
+  const stop = selectedStop;
+  if (!stop || exportJobInProgress) return;
+
+  setExportJobInProgress(true);
+  try {
+    setProgress(4, `Rendering PNG for ${stopDisplayLabel(stop)}…`);
+    const context = stopExportContext(stop);
+    const { dataUrl } = await renderStablePngDataUrl(stop, context);
+    triggerDataUrlDownload(buildStopExportFilename(stop, "png"), dataUrl);
+    setProgress(100, "Ready. Click a stop.");
+  } finally {
+    setExportJobInProgress(false);
+  }
+}
+
+async function downloadSelectedStopAsSvg() {
+  const stop = selectedStop;
+  if (!stop || exportJobInProgress) return;
+
+  setExportJobInProgress(true);
+  try {
+    setProgress(4, `Rendering SVG for ${stopDisplayLabel(stop)}…`);
+    const context = stopExportContext(stop);
+    const { svg } = await renderStableSvgMarkup(stop, context);
+    const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+    triggerBlobDownload(buildStopExportFilename(stop, "svg"), blob);
+    setProgress(100, "Ready. Click a stop.");
+  } finally {
+    setExportJobInProgress(false);
+  }
+}
+
+async function buildMassDownloadZip(stopsToExport, format) {
+  const targetFormat = format === "svg" ? "svg" : "png";
+  const total = stopsToExport.length;
+  const zip = new JSZip();
+  const usedNames = new Set();
+
+  for (let i = 0; i < total; i += 1) {
+    const stop = stopsToExport[i];
+    const renderPct = 5 + ((i / total) * 85);
+    setProgress(renderPct, `Rendering ${targetFormat.toUpperCase()} ${i + 1}/${total}: ${stopDisplayLabel(stop)}…`);
+    const context = stopExportContext(stop);
+    const filename = uniqueFilename(buildStopExportFilename(stop, targetFormat), usedNames);
+
+    if (targetFormat === "png") {
+      const { dataUrl } = await renderStablePngDataUrl(stop, context);
+      const base64 = pngDataUrlToBase64(dataUrl);
+      if (!base64) throw new Error(`Failed to encode PNG for ${stopDisplayLabel(stop)}.`);
+      zip.file(filename, base64, { base64: true });
+    } else {
+      const { svg } = await renderStableSvgMarkup(stop, context);
+      zip.file(filename, svg);
+    }
+  }
+
+  setProgress(92, `Creating ${targetFormat.toUpperCase()} ZIP…`);
+  const zipBlob = await zip.generateAsync(
+    {
+      type: "blob",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 },
+    },
+    (meta) => {
+      const p = Math.max(0, Math.min(100, Number(meta?.percent) || 0));
+      const pct = 92 + (p * 0.08);
+      setProgress(pct, `Creating ${targetFormat.toUpperCase()} ZIP… ${Math.round(p)}%`);
+    },
+  );
+
+  return zipBlob;
+}
+
+async function downloadSelectedRegionZip() {
+  if (exportJobInProgress) return;
+  if (!massSelectedStops.length) {
+    alert("Select a region first.");
+    return;
+  }
+
+  const format = ui.massDownloadFormat?.value === "svg" ? "svg" : "png";
+  const confirmed = window.confirm(`Download ${niceInt(massSelectedStops.length)} stops as ${format.toUpperCase()} in one ZIP?`);
+  if (!confirmed) return;
+
+  const stopsToExport = massSelectedStops.slice();
+  const restoreStop = selectedStop;
+  const restoreSummary = selectedStopRouteSummary;
+
+  setMassSelectionMode(false);
+  setExportJobInProgress(true);
+  try {
+    setMassDownloadStatus(`Preparing ${niceInt(stopsToExport.length)} ${format.toUpperCase()} file${stopsToExport.length === 1 ? "" : "s"}…`);
+    const zipBlob = await buildMassDownloadZip(stopsToExport, format);
+    const zipName = buildMassZipFilename(format, stopsToExport.length);
+    triggerBlobDownload(zipName, zipBlob);
+    setMassDownloadStatus(`Downloaded ${zipName}`);
+    setProgress(100, "Ready. Click a stop.");
+  } finally {
+    if (restoreStop) {
+      selectedStop = restoreStop;
+      selectedStopRouteSummary = restoreSummary;
+      rerenderSelectedStopSign();
+    }
+    setExportJobInProgress(false);
+  }
+}
+
+ui.downloadBtn.addEventListener("click", async () => {
+  try {
+    await downloadSelectedStopAsPng();
   } catch (err) {
     console.error(err);
+    setProgress(100, "Ready. Click a stop.");
     alert("Failed to export PNG. Try again in a moment.");
   }
 });
 
 ui.downloadSvgBtn.addEventListener("click", async () => {
-  const stop = selectedStop;
-  if (!stop) return;
-
-  const directionFilter = FIXED_DIRECTION_FILTER;
-  const maxRoutes = Math.max(0, getRouteSummaryForStop(stop, directionFilter).length);
-  const outputScale = FIXED_EXPORT_SCALE;
-  const items = getRouteSummaryForStop(stop, directionFilter);
-  let svg = "";
   try {
-    svg = await buildSignSvg({
-      stop,
-      items,
-      directionFilter,
-      maxRoutes,
-      outputScale,
-      showStops: showStopsOnSign,
-    });
+    await downloadSelectedStopAsSvg();
   } catch (err) {
     console.error(err);
+    setProgress(100, "Ready. Click a stop.");
     alert("Failed to export SVG. Try again in a moment.");
+  }
+});
+
+ui.massSelectRegionBtn?.addEventListener("click", () => {
+  if (exportJobInProgress) return;
+  if (!map || !stops.length) {
+    alert("Load GTFS data before using Mass Download.");
     return;
   }
+  if (massSelectionMode) {
+    setMassSelectionMode(false);
+    setMassDownloadStatus("Selection canceled.");
+    return;
+  }
+  setMassSelectionMode(true);
+});
 
-  const name = (stop.stop_name || "bus_stop").toString().replace(/[^\w\-]+/g, "_").slice(0, 50);
-  const code = (stop.stop_code || stop.stop_id || "").toString().replace(/[^\w\-]+/g, "_").slice(0, 30);
-  const filename = `${name}_${code}_dir-${directionFilter}_svg-${outputScale}x.svg`;
-
-  const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
+ui.massDownloadBtn?.addEventListener("click", async () => {
   try {
-    const a = document.createElement("a");
-    a.download = filename;
-    a.href = url;
-    a.click();
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    await downloadSelectedRegionZip();
+  } catch (err) {
+    console.error(err);
+    setProgress(100, "Ready. Click a stop.");
+    setMassDownloadStatus(`Mass download failed: ${err?.message || err}`);
+    alert("Mass download failed. Try again in a moment.");
   }
 });
 
@@ -5664,6 +6210,10 @@ ui.copyBtn.addEventListener("click", async () => {
 });
 
 ui.showStopsToggle?.addEventListener("change", () => {
+  if (exportJobInProgress) {
+    syncShowStopsToggleUi();
+    return;
+  }
   showStopsOnSign = !!ui.showStopsToggle?.checked;
   syncShowStopsToggleUi();
   if (showStopsOnSign) {
@@ -5728,6 +6278,9 @@ async function boot({ zipUrl, zipFile, zipName }) {
   routeSummaryCache = new Map();
   preloadedStopOverlayByStop = new Map();
   resetTripStopOverlayCaches();
+  setMassSelectionMode(false);
+  clearMassSelection();
+  setMassDownloadStatus("Click “Select Region”, then drag over the map.");
   setUpdatesUi({ showButton: false, showStatus: false });
 
   try {

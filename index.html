@@ -63,13 +63,22 @@
         <div id="progressText" class="muted small">Loading…</div>
       </div>
 
-      <div class="card">
-        <div class="card__title">Tips</div>
-        <ul class="small">
-          <li>Zoom in for faster clicking (fewer markers in a cluster).</li>
-          <li>Some stops serve many routes; the sign shows top routes for the chosen direction.</li>
-          <li>If you host this, keep <code>google_transit.zip</code> beside these files.</li>
-        </ul>
+      <div class="card massDownload">
+        <div class="card__title">Mass Download</div>
+        <div class="small muted">Drag on the map to select a region, then export all stops in one ZIP.</div>
+        <div class="massDownload__controls">
+          <button id="massSelectRegionBtn" class="btn btn--ghost">Select Region</button>
+          <label class="field massDownload__format">
+            <span class="field__label">ZIP contains</span>
+            <select id="massDownloadFormat" class="input">
+              <option value="png">PNGs</option>
+              <option value="svg">SVGs</option>
+            </select>
+          </label>
+          <button id="massDownloadBtn" class="btn btn--primary" disabled>Download Region ZIP</button>
+          <div id="massSelectionCount" class="small muted">No region selected.</div>
+          <div id="massDownloadStatus" class="small muted">Click “Select Region”, then drag over the map.</div>
+        </div>
       </div>
     </aside>
   </main>
