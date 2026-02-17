@@ -140,7 +140,8 @@ function computeStopSummaries({ stopTripTimesById, tripsById, routesById, hasSer
       if (!route) continue;
 
       const headsign = (t.trip_headsign && String(t.trip_headsign).trim()) || (route.route_long_name || route.route_short_name || "");
-      const key = `${t.route_id}||${dir ?? ""}`;
+      const shapeIdForKey = String(t.shape_id ?? "").trim();
+      const key = `${t.route_id}||${dir ?? ""}||${shapeIdForKey}||${headsign}`;
       const cur = aggAll.get(key) || {
         route_id: t.route_id,
         direction_id: dir,

@@ -539,7 +539,10 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
                 continue
 
             direction = t["direction_id"] if t["direction_id"] != "" else None
-            key = (t["route_id"], direction)
+            route = routes_by_id.get(t["route_id"], {})
+            headsign = (str(t["trip_headsign"]).strip() if t["trip_headsign"] else "") or route.get("route_long_name") or route.get("route_short_name") or ""
+            shape_id_for_key = str(t.get("shape_id") or "").strip()
+            key = (t["route_id"], direction, shape_id_for_key, headsign)
             cur = agg_all.get(key)
             if cur is None:
                 cur = {
@@ -557,8 +560,6 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
             if t["shape_id"]:
                 cur["shapeCounts"][t["shape_id"]] = cur["shapeCounts"].get(t["shape_id"], 0) + 1
 
-            route = routes_by_id.get(t["route_id"], {})
-            headsign = (str(t["trip_headsign"]).strip() if t["trip_headsign"] else "") or route.get("route_long_name") or route.get("route_short_name") or ""
             if headsign:
                 cur["headsignCounts"][headsign] = cur["headsignCounts"].get(headsign, 0) + 1
 
@@ -614,7 +615,7 @@ with zipfile.ZipFile(ZIP_PATH, "r") as zf:
                 output_stop_overlays[stop_id] = overlays_for_stop
 
     out = {
-        "version": 4,
+        "version": 5,
         "generated_at": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "source_zip": os.path.basename(ZIP_PATH),
         "item_fields": COMPACT_ITEM_FIELDS,

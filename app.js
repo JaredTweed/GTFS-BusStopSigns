@@ -228,7 +228,7 @@ const SIGN_ROUTE_CONTINUITY_SAMPLE_STEP_PX = 1.2;
 const SIGN_ROUTE_CORNER_TRIANGLE_REMOVE_MAX_PX = 50;
 const STOP_OVERLAY_TRIP_CANDIDATE_LIMIT = 24;
 const PRELOADED_SUMMARY_URL = "./preloaded_route_summaries.json";
-const PRELOADED_SUMMARY_MIN_VERSION = 4;
+const PRELOADED_SUMMARY_MIN_VERSION = 5;
 const PRELOADED_SUMMARY_COMPACT_ITEM_FIELDS = [
   "route_id",
   "direction_id",
@@ -5282,7 +5282,8 @@ function computeRouteSummaryForStop(stop, directionFilter) {
     if (!route) continue;
 
     const headsign = (t.trip_headsign && String(t.trip_headsign).trim()) || (route.route_long_name || route.route_short_name || "");
-    const k = `${t.route_id}||${dir ?? ""}`;
+    const shapeIdForKey = String(t.shape_id ?? "").trim();
+    const k = `${t.route_id}||${dir ?? ""}||${shapeIdForKey}||${headsign}`;
     const cur = agg.get(k) || {
       route_id: t.route_id,
       direction_id: dir,
