@@ -4861,7 +4861,7 @@ async function drawSign({
   }
 
   ctx.fillStyle = "#4b5563";
-  ctx.font = "600 13px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+  ctx.font = "600 12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
   ctx.textAlign = "center";
   ctx.textBaseline = "alphabetic";
   for (let i = 0; i < SIGN_HEADER_QR_CAPTION_LINES.length; i += 1) {
@@ -5010,7 +5010,7 @@ async function buildSignSvg({
   }
   const qrCaptionSvg = SIGN_HEADER_QR_CAPTION_LINES.map((line, idx) => {
     const y = qrLayout.captionStartY + (idx * SIGN_HEADER_QR_CAPTION_LINE_HEIGHT);
-    return `<text x="${qrLayout.captionX.toFixed(2)}" y="${y.toFixed(2)}" text-anchor="middle" fill="#4b5563" font-size="13" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(line)}</text>`;
+    return `<text x="${qrLayout.captionX.toFixed(2)}" y="${y.toFixed(2)}" text-anchor="middle" fill="#4b5563" font-size="12" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(line)}</text>`;
   }).join("");
   const qrImageSvg = qrDataUrl
     ? `<image href="${qrDataUrl}" x="${qrLayout.x.toFixed(2)}" y="${qrLayout.y.toFixed(2)}" width="${qrLayout.size.toFixed(2)}" height="${qrLayout.size.toFixed(2)}" />`
