@@ -268,9 +268,8 @@ const DIRECTION_PREFIX_BY_WORD = new Map([
 const PREVIEW_ZOOM_MIN = 1;
 const PREVIEW_ZOOM_MAX = 5;
 const PREVIEW_ZOOM_STEP = 1.12;
-const EXPORT_RENDER_SETTLE_MS = 300;
-const EXPORT_STABILIZE_PAUSE_MS = 700;
 const EXPORT_MAX_RENDER_ATTEMPTS = 8;
+const EXPORT_RETRY_DELAYS_MS = Object.freeze([120, 200, 320, 500, 760, 1100, 1500, 2000]);
 const MASS_SELECT_DRAG_MIN_PX = 8;
 let previewZoomScale = 1;
 let previewZoomOriginX = 50;
@@ -400,6 +399,12 @@ function waitMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, delay));
 }
 
+function exportRetryDelayMs(attemptNumber) {
+  const attempt = Math.max(1, Number(attemptNumber) || 1);
+  const idx = Math.min(EXPORT_RETRY_DELAYS_MS.length - 1, attempt - 1);
+  return EXPORT_RETRY_DELAYS_MS[idx];
+}
+
 function createCanceledError(message = "Canceled.") {
   const err = new Error(String(message || "Canceled."));
   err.name = "AbortError";
@@ -508,15 +513,16 @@ function triggerBlobDownload(filename, blob) {
   }
 }
 
-function triggerDataUrlDownload(filename, dataUrl) {
-  const a = document.createElement("a");
-  a.download = filename;
-  a.href = dataUrl;
-  a.click();
-}
-
-function pngDataUrlToBase64(dataUrl) {
-  return String(dataUrl || "").replace(/^data:image\/png;base64,/, "");
+function canvasToBlob(canvas, type = "image/png") {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+        return;
+      }
+      reject(new Error(`Failed to render ${type} blob.`));
+    }, type);
+  });
 }
 
 function setMassDownloadStatus(text) {
@@ -4771,19 +4777,28 @@ function ensureSignVectorMapHost(width, height) {
 function waitForMapIdle(mapObj, timeoutMs = 5000) {
   return new Promise((resolve) => {
     let done = false;
-    const finish = () => {
+    const tilesLoadedNow = () => {
+      if (!mapObj?.loaded?.()) return false;
+      if (typeof mapObj.areTilesLoaded === "function") return !!mapObj.areTilesLoaded();
+      return true;
+    };
+    const finish = (reason) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       mapObj.off("idle", onIdle);
-      resolve();
+      resolve({
+        reason,
+        timedOut: reason === "timeout",
+        tilesLoaded: tilesLoadedNow(),
+      });
     };
-    const onIdle = () => finish();
-    const timer = setTimeout(finish, timeoutMs);
+    const onIdle = () => finish("idle");
+    const timer = setTimeout(() => finish("timeout"), timeoutMs);
     mapObj.once("idle", onIdle);
 
-    if (mapObj.loaded() && typeof mapObj.areTilesLoaded === "function" && mapObj.areTilesLoaded()) {
-      requestAnimationFrame(() => finish());
+    if (tilesLoadedNow()) {
+      requestAnimationFrame(() => finish("already-loaded"));
     }
   });
 }
@@ -4829,7 +4844,7 @@ async function renderVectorBasemapSnapshot({ bounds, width, height }) {
       bearing: 0,
       pitch: 0,
     });
-    await waitForMapIdle(mapObj);
+    const idleState = await waitForMapIdle(mapObj);
 
     const src = mapObj.getCanvas();
     if (!src || src.width <= 0 || src.height <= 0) return null;
@@ -4839,7 +4854,13 @@ async function renderVectorBasemapSnapshot({ bounds, width, height }) {
     snapshot.height = src.height;
     const sctx = snapshot.getContext("2d");
     sctx.drawImage(src, 0, 0);
-    return { canvas: snapshot, view, roadLabelZoomFactor };
+    return {
+      canvas: snapshot,
+      view,
+      roadLabelZoomFactor,
+      fullyLoaded: idleState?.tilesLoaded !== false,
+      idleState,
+    };
   } catch (err) {
     console.warn("Vector sign basemap unavailable, using raster fallback.", err);
     signVectorUnavailable = true;
@@ -4895,10 +4916,13 @@ async function drawRasterBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
     x1,
     y1,
   } = view;
+  let requestedTiles = 0;
+  let failedTiles = 0;
 
   const draws = [];
   for (let tx = x0; tx <= x1; tx += 1) {
     for (let ty = y0; ty <= y1; ty += 1) {
+      requestedTiles += 1;
       draws.push((async () => {
         try {
           const img = await loadTileImage(tileZoom, tx, ty, "base");
@@ -4906,6 +4930,7 @@ async function drawRasterBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
           const py = y + ((ty * tileSize) - top);
           ctx.drawImage(img, px, py, tileSize, tileSize);
         } catch {
+          failedTiles += 1;
           // Best-effort tiles; continue rendering.
         }
       })());
@@ -4916,6 +4941,7 @@ async function drawRasterBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
   const labelDraws = [];
   for (let tx = x0; tx <= x1; tx += 1) {
     for (let ty = y0; ty <= y1; ty += 1) {
+      requestedTiles += 1;
       labelDraws.push((async () => {
         try {
           const img = await loadTileImage(tileZoom, tx, ty, "labels");
@@ -4926,12 +4952,20 @@ async function drawRasterBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
           ctx.drawImage(img, px, py, tileSize, tileSize);
           ctx.restore();
         } catch {
+          failedTiles += 1;
           // Best-effort tiles; continue rendering.
         }
       })());
     }
   }
   await Promise.all(labelDraws);
+
+  return {
+    mode: "raster",
+    requestedTiles,
+    failedTiles,
+    fullyLoaded: failedTiles === 0,
+  };
 }
 
 async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
@@ -4941,9 +4975,13 @@ async function drawBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds }) {
     ctx.globalAlpha = SIGN_BASEMAP_OPACITY;
     ctx.drawImage(vectorSnapshot.canvas, x, y, w, h);
     ctx.restore();
-    return;
+    return {
+      mode: "vector",
+      fullyLoaded: vectorSnapshot.fullyLoaded !== false,
+      idleState: vectorSnapshot.idleState || null,
+    };
   }
-  await drawRasterBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds });
+  return drawRasterBasemapTilesOnCanvas(ctx, { x, y, w, h, bounds });
 }
 
 function makeCanvasProjector(bounds, drawX, drawY, drawW, drawH) {
@@ -4985,7 +5023,10 @@ async function drawRoutePreviewOnCanvas(ctx, {
       x + mapCfg.noRouteMessageXOffset,
       y + Math.floor(h / 2),
     );
-    return;
+    return {
+      basemapReady: true,
+      basemapMode: "none",
+    };
   }
 
   const pad = mapCfg.innerPad;
@@ -5000,10 +5041,16 @@ async function drawRoutePreviewOnCanvas(ctx, {
   ctx.beginPath();
   roundRect(ctx, drawX, drawY, drawW, drawH, mapCfg.clipRadius, false, false);
   ctx.clip();
-  await drawBasemapTilesOnCanvas(ctx, { x: drawX, y: drawY, w: drawW, h: drawH, bounds });
+  const basemapStatus = await drawBasemapTilesOnCanvas(ctx, { x: drawX, y: drawY, w: drawW, h: drawH, bounds });
   ctx.restore();
 
-  if (renderToken !== signRenderToken) return;
+  if (renderToken !== signRenderToken) {
+    return {
+      basemapReady: false,
+      basemapMode: basemapStatus?.mode || "unknown",
+      aborted: true,
+    };
+  }
 
   const { project } = makeCanvasProjector(bounds, drawX, drawY, drawW, drawH);
   const sharedEdges = buildSharedEdges(segments, stop);
@@ -5138,6 +5185,11 @@ async function drawRoutePreviewOnCanvas(ctx, {
     legendY += itemGap;
     if (legendY > y + h - legendCfg.bottomGuard) break;
   }
+
+  return {
+    basemapReady: basemapStatus?.fullyLoaded !== false,
+    basemapMode: basemapStatus?.mode || "unknown",
+  };
 }
 
 function computeRouteSummaryForStop(stop, directionFilter) {
@@ -5591,12 +5643,16 @@ async function drawSign({
   } catch (err) {
     console.warn("Failed to generate stop QR code.", err);
   }
-  if (renderToken !== signRenderToken) return;
+  if (renderToken !== signRenderToken) {
+    return { basemapReady: false, basemapMode: "unknown", aborted: true };
+  }
 
   if (qrDataUrl) {
     try {
       const qrImg = await loadImageFromSource(qrDataUrl);
-      if (renderToken !== signRenderToken) return;
+      if (renderToken !== signRenderToken) {
+        return { basemapReady: false, basemapMode: "unknown", aborted: true };
+      }
       ctx.drawImage(qrImg, qrLayout.x, qrLayout.y, qrLayout.size, qrLayout.size);
     } catch (err) {
       console.warn("Failed to load stop QR image.", err);
@@ -5631,14 +5687,16 @@ async function drawSign({
       console.warn("Failed to load route stop markers for sign preview.", err);
       routeStopMarkersBySegment = null;
     }
-    if (renderToken !== signRenderToken) return;
+    if (renderToken !== signRenderToken) {
+      return { basemapReady: false, basemapMode: "unknown", aborted: true };
+    }
   }
 
   // Route map preview (this is rendered into the PNG)
   ctx.fillStyle = colorCfg.mapTitle;
   ctx.font = signCanvasFont(typeCfg.mapTitle);
   ctx.fillText(SIGN_TEMPLATE.labels.mapTitle, pad, layout.mapTitleBaselineY);
-  await drawRoutePreviewOnCanvas(ctx, {
+  const routePreviewStatus = await drawRoutePreviewOnCanvas(ctx, {
     x: layout.mapOuterX,
     y: layout.mapOuterY,
     w: layout.mapOuterWidth,
@@ -5650,12 +5708,18 @@ async function drawSign({
     routeStopMarkersBySegment,
   });
 
-  if (renderToken !== signRenderToken) return;
+  if (renderToken !== signRenderToken) {
+    return { basemapReady: false, basemapMode: routePreviewStatus?.basemapMode || "unknown", aborted: true };
+  }
 
   // Footer
   ctx.fillStyle = colorCfg.footer;
   ctx.font = signCanvasFont(typeCfg.footer);
   ctx.fillText(signFooterText(), pad, layout.footerBaselineY);
+  return {
+    basemapReady: routePreviewStatus?.basemapReady !== false,
+    basemapMode: routePreviewStatus?.basemapMode || "unknown",
+  };
 }
 
 function escXml(s) {
@@ -5753,9 +5817,13 @@ async function buildSignSvg({
 
   const mapClipId = "mapClip";
   const mapTileSvg = [];
+  let mapReady = true;
+  let basemapMode = "raster-svg-remote";
   let vectorMapHref = "";
   const vectorSnapshot = await renderVectorBasemapSnapshot({ bounds, width: drawW, height: drawH });
   if (vectorSnapshot?.canvas) {
+    mapReady = vectorSnapshot.fullyLoaded !== false;
+    basemapMode = "vector";
     try {
       vectorMapHref = vectorSnapshot.canvas.toDataURL("image/png");
     } catch {
@@ -5768,6 +5836,7 @@ async function buildSignSvg({
       `<image href="${vectorMapHref}" x="${drawX.toFixed(2)}" y="${drawY.toFixed(2)}" width="${drawW.toFixed(2)}" height="${drawH.toFixed(2)}" opacity="${SIGN_BASEMAP_OPACITY}" />`,
     );
   } else {
+    basemapMode = "raster-svg-remote";
     const view = computeSignMapViewWindow(bounds, drawW, drawH, SIGN_BASEMAP_TILE_ZOOM_OFFSET);
     const {
       tileZoom,
@@ -5865,7 +5934,7 @@ async function buildSignSvg({
     if (legendY > layout.mapOuterY + layout.mapOuterHeight - legendCfg.bottomGuard) break;
   }
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${svgOutW}" height="${svgOutH}" viewBox="0 0 ${W} ${H}">
   <defs>
     <clipPath id="${mapClipId}">
@@ -5890,6 +5959,11 @@ async function buildSignSvg({
   ${legendSvg.join("")}
   <text x="${layout.pad}" y="${layout.footerBaselineY}" fill="${colorCfg.footer}" ${signSvgFontAttrs(typeCfg.footer)}>${escXml(signFooterText())}</text>
 </svg>`;
+  return {
+    svg,
+    mapReady,
+    basemapMode,
+  };
 }
 
 function roundRect(ctx, x, y, w, h, r, fill, stroke) {
@@ -6081,15 +6155,15 @@ function stopExportContext(stop) {
   };
 }
 
-async function renderStablePngDataUrl(stop, context = null, cancelToken = null) {
+async function renderStablePngToCanvas(stop, context = null, cancelToken = null) {
   const exportContext = context || stopExportContext(stop);
-  let previousDataUrl = "";
   const cancelMessage = `Mass download canceled while rendering PNG for ${stopDisplayLabel(stop)}.`;
+  let lastBasemapMode = "unknown";
 
   for (let attempt = 1; attempt <= EXPORT_MAX_RENDER_ATTEMPTS; attempt += 1) {
     throwIfCanceled(cancelToken, cancelMessage);
     const renderToken = ++signRenderToken;
-    await drawSign({
+    const drawStatus = await drawSign({
       stop,
       items: exportContext.items,
       directionFilter: exportContext.directionFilter,
@@ -6103,30 +6177,40 @@ async function renderStablePngDataUrl(stop, context = null, cancelToken = null) 
       throw new Error(`Render for ${stopDisplayLabel(stop)} was superseded.`);
     }
 
-    await waitMsCancellable(EXPORT_RENDER_SETTLE_MS, cancelToken, cancelMessage);
-    const currentDataUrl = ui.signCanvas.toDataURL("image/png");
-    if (previousDataUrl && currentDataUrl === previousDataUrl) {
-      return { dataUrl: currentDataUrl, attempts: attempt };
+    const basemapMode = drawStatus?.basemapMode || "unknown";
+    const basemapReady = drawStatus?.basemapReady !== false;
+    if (basemapReady) {
+      return { attempts: attempt, basemapMode };
     }
-    previousDataUrl = currentDataUrl;
+
+    lastBasemapMode = basemapMode;
     if (attempt < EXPORT_MAX_RENDER_ATTEMPTS) {
-      await waitMsCancellable(EXPORT_STABILIZE_PAUSE_MS, cancelToken, cancelMessage);
+      await waitMsCancellable(exportRetryDelayMs(attempt), cancelToken, cancelMessage);
     }
   }
 
   throw new Error(
-    `PNG render for ${stopDisplayLabel(stop)} did not stabilize after ${EXPORT_MAX_RENDER_ATTEMPTS} attempts.`,
+    `PNG basemap for ${stopDisplayLabel(stop)} was not fully ready after ${EXPORT_MAX_RENDER_ATTEMPTS} attempts (mode: ${lastBasemapMode}).`,
   );
+}
+
+async function renderStablePngBlob(stop, context = null, cancelToken = null) {
+  const stable = await renderStablePngToCanvas(stop, context, cancelToken);
+  const blob = await canvasToBlob(ui.signCanvas, "image/png");
+  return {
+    ...stable,
+    blob,
+  };
 }
 
 async function renderStableSvgMarkup(stop, context = null, cancelToken = null) {
   const exportContext = context || stopExportContext(stop);
-  let previousSvg = "";
   const cancelMessage = `Mass download canceled while rendering SVG for ${stopDisplayLabel(stop)}.`;
+  let lastBasemapMode = "unknown";
 
   for (let attempt = 1; attempt <= EXPORT_MAX_RENDER_ATTEMPTS; attempt += 1) {
     throwIfCanceled(cancelToken, cancelMessage);
-    const currentSvg = await buildSignSvg({
+    const svgResult = await buildSignSvg({
       stop,
       items: exportContext.items,
       directionFilter: exportContext.directionFilter,
@@ -6135,17 +6219,30 @@ async function renderStableSvgMarkup(stop, context = null, cancelToken = null) {
       showStops: exportContext.showStops,
     });
     throwIfCanceled(cancelToken, cancelMessage);
-    if (previousSvg && currentSvg === previousSvg) {
-      return { svg: currentSvg, attempts: attempt };
+    const currentSvg = typeof svgResult === "string" ? svgResult : String(svgResult?.svg || "");
+    if (!currentSvg) {
+      throw new Error(`Failed to build SVG for ${stopDisplayLabel(stop)}.`);
     }
-    previousSvg = currentSvg;
+
+    const basemapMode = typeof svgResult === "string"
+      ? "raster-svg-remote"
+      : (svgResult?.basemapMode || "unknown");
+    const basemapReady = typeof svgResult === "string"
+      ? true
+      : (svgResult?.mapReady !== false);
+
+    if (basemapReady) {
+      return { svg: currentSvg, attempts: attempt, basemapMode };
+    }
+
+    lastBasemapMode = basemapMode;
     if (attempt < EXPORT_MAX_RENDER_ATTEMPTS) {
-      await waitMsCancellable(EXPORT_STABILIZE_PAUSE_MS, cancelToken, cancelMessage);
+      await waitMsCancellable(exportRetryDelayMs(attempt), cancelToken, cancelMessage);
     }
   }
 
   throw new Error(
-    `SVG render for ${stopDisplayLabel(stop)} did not stabilize after ${EXPORT_MAX_RENDER_ATTEMPTS} attempts.`,
+    `SVG basemap for ${stopDisplayLabel(stop)} was not fully ready after ${EXPORT_MAX_RENDER_ATTEMPTS} attempts (mode: ${lastBasemapMode}).`,
   );
 }
 
@@ -6157,8 +6254,8 @@ async function downloadSelectedStopAsPng() {
   try {
     setProgress(4, `Rendering PNG for ${stopDisplayLabel(stop)}…`);
     const context = stopExportContext(stop);
-    const { dataUrl } = await renderStablePngDataUrl(stop, context);
-    triggerDataUrlDownload(buildStopExportFilename(stop, "png"), dataUrl);
+    const { blob } = await renderStablePngBlob(stop, context);
+    triggerBlobDownload(buildStopExportFilename(stop, "png"), blob);
     setProgress(100, "Ready. Click a stop.");
   } finally {
     setExportJobInProgress(false);
@@ -6200,10 +6297,8 @@ async function buildMassDownloadZip(stopsToExport, format, cancelToken = null) {
     const filename = uniqueFilename(buildStopExportFilename(stop, targetFormat), usedNames);
 
     if (targetFormat === "png") {
-      const { dataUrl } = await renderStablePngDataUrl(stop, context, cancelToken);
-      const base64 = pngDataUrlToBase64(dataUrl);
-      if (!base64) throw new Error(`Failed to encode PNG for ${stopDisplayLabel(stop)}.`);
-      zip.file(filename, base64, { base64: true });
+      const { blob } = await renderStablePngBlob(stop, context, cancelToken);
+      zip.file(filename, blob);
     } else {
       const { svg } = await renderStableSvgMarkup(stop, context, cancelToken);
       zip.file(filename, svg);
@@ -6212,12 +6307,18 @@ async function buildMassDownloadZip(stopsToExport, format, cancelToken = null) {
 
   throwIfCanceled(cancelToken, cancelMessage);
   setProgress(92, `Creating ${targetFormat.toUpperCase()} ZIP…`);
-  const zipBlob = await zip.generateAsync(
-    {
+  const zipGenerateOptions = targetFormat === "png"
+    ? {
+      type: "blob",
+      compression: "STORE",
+    }
+    : {
       type: "blob",
       compression: "DEFLATE",
-      compressionOptions: { level: 6 },
-    },
+      compressionOptions: { level: 4 },
+    };
+  const zipBlob = await zip.generateAsync(
+    zipGenerateOptions,
     (meta) => {
       throwIfCanceled(cancelToken, cancelMessage);
       const p = Math.max(0, Math.min(100, Number(meta?.percent) || 0));
