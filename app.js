@@ -148,6 +148,20 @@ const TRANSLINK_LATEST_GTFS_URL = "https://gtfs-static.translink.ca/gtfs/google_
 const FIXED_DIRECTION_FILTER = "all";
 const FIXED_EXPORT_SCALE = 3;
 const QR_URL_MODE_TOGGLE_KEY = "KeyY";
+const TOUCH_STOP_MARKER_STYLE = Object.freeze({
+  radius: 8,
+  weight: 1.5,
+  fillOpacity: 0.9,
+});
+const DEFAULT_STOP_MARKER_STYLE = Object.freeze({
+  radius: 4,
+  weight: 1,
+  fillOpacity: 0.85,
+});
+const TOUCH_MAP_TAP_TOLERANCE = 30;
+const DEFAULT_MAP_TAP_TOLERANCE = 15;
+const TOUCH_CANVAS_TOLERANCE = 10;
+const DEFAULT_CANVAS_TOLERANCE = 0;
 const DIRECTION_PREFIX_BY_WORD = new Map([
   ["eastbound", "EB"],
   ["westbound", "WB"],
@@ -166,6 +180,18 @@ let signVectorMap = null;
 let signVectorUnavailable = false;
 let signVectorRoadLabelBaseSizeByLayer = new Map();
 let signVectorRoadLabelLastFactor = null;
+
+function isCoarsePointerDevice() {
+  if (typeof window === "undefined") return false;
+  const media = window.matchMedia?.("(pointer: coarse)");
+  if (media && media.matches) return true;
+  const touchPoints = Number(navigator?.maxTouchPoints || 0);
+  return touchPoints > 0;
+}
+
+function stopMarkerStyle() {
+  return isCoarsePointerDevice() ? TOUCH_STOP_MARKER_STYLE : DEFAULT_STOP_MARKER_STYLE;
+}
 
 function applyPreviewZoom() {
   if (!ui.signCanvas) return;
@@ -1120,7 +1146,12 @@ async function loadZipFromFile(file) {
 }
 
 function initMap() {
-  map = L.map("map", { preferCanvas: true }).setView([49.25, -123.12], 11);
+  const touchDevice = isCoarsePointerDevice();
+  map = L.map("map", {
+    preferCanvas: true,
+    tapTolerance: touchDevice ? TOUCH_MAP_TAP_TOLERANCE : DEFAULT_MAP_TAP_TOLERANCE,
+    renderer: L.canvas({ tolerance: touchDevice ? TOUCH_CANVAS_TOLERANCE : DEFAULT_CANVAS_TOLERANCE }),
+  }).setView([49.25, -123.12], 11);
 
   L.tileLayer(MAP_TILE_BASE_URL, {
     maxZoom: 19,
@@ -1145,6 +1176,7 @@ function initMap() {
 
 function addStopsToMap() {
   markerCluster.clearLayers();
+  const markerStyle = stopMarkerStyle();
 
   for (const s of stops) {
     const lat = safeParseFloat(s.stop_lat);
@@ -1152,9 +1184,7 @@ function addStopsToMap() {
     if (lat == null || lon == null) continue;
 
     const m = L.circleMarker([lat, lon], {
-      radius: 4,
-      weight: 1,
-      fillOpacity: 0.85,
+      ...markerStyle,
     });
 
     const title = s.stop_name || "Stop";
