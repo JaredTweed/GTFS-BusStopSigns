@@ -293,6 +293,7 @@ let massSelectionLayer = null;
 let massSelectionBounds = null;
 let massSelectedStops = [];
 let activeMassDownloadCancelToken = null;
+let massSelectionMapHandlerState = null;
 
 function isCoarsePointerDevice() {
   if (typeof window === "undefined") return false;
@@ -571,6 +572,36 @@ function setExportJobInProgress(next) {
   if (ui.copyBtn) ui.copyBtn.disabled = exportJobInProgress;
   if (ui.showStopsToggle) ui.showStopsToggle.disabled = exportJobInProgress;
   updateMassDownloadUi();
+}
+
+function setMapInteractionLockedForMassSelection(locked) {
+  if (!map) return;
+  const handlers = [
+    ["dragging", map.dragging],
+    ["touchZoom", map.touchZoom],
+    ["boxZoom", map.boxZoom],
+    ["keyboard", map.keyboard],
+  ];
+
+  if (locked) {
+    if (massSelectionMapHandlerState) return;
+    const state = {};
+    for (const [name, handler] of handlers) {
+      const isEnabled = !!handler?.enabled?.();
+      state[name] = isEnabled;
+      if (isEnabled) handler.disable();
+    }
+    massSelectionMapHandlerState = state;
+    return;
+  }
+
+  if (!massSelectionMapHandlerState) return;
+  const state = massSelectionMapHandlerState;
+  massSelectionMapHandlerState = null;
+  for (const [name, handler] of handlers) {
+    if (!state[name]) continue;
+    handler?.enable?.();
+  }
 }
 
 function buildGoogleMapsStopQueryName(stopNameRaw) {
@@ -1622,6 +1653,10 @@ function ensureMassSelectionOverlay() {
   overlay.addEventListener("pointermove", onMassSelectionPointerMove);
   overlay.addEventListener("pointerup", onMassSelectionPointerUp);
   overlay.addEventListener("pointercancel", onMassSelectionPointerCancel);
+  overlay.addEventListener("touchstart", onMassSelectionOverlayTouchEvent, { passive: false });
+  overlay.addEventListener("touchmove", onMassSelectionOverlayTouchEvent, { passive: false });
+  overlay.addEventListener("touchend", onMassSelectionOverlayTouchEvent, { passive: false });
+  overlay.addEventListener("touchcancel", onMassSelectionOverlayTouchEvent, { passive: false });
 }
 
 function overlayPointFromPointerEvent(ev) {
@@ -1671,6 +1706,7 @@ function endMassSelectionDragVisual() {
 function setMassSelectionMode(next) {
   const enabled = !!next;
   massSelectionMode = enabled;
+  setMapInteractionLockedForMassSelection(enabled);
   ensureMassSelectionOverlay();
   if (massSelectionOverlay) {
     massSelectionOverlay.classList.toggle("active", enabled);
@@ -1681,6 +1717,12 @@ function setMassSelectionMode(next) {
     setMassDownloadStatus("Drag a rectangle on the map to choose stops.");
   }
   updateMassDownloadUi();
+}
+
+function onMassSelectionOverlayTouchEvent(ev) {
+  if (!massSelectionMode) return;
+  ev.preventDefault();
+  ev.stopPropagation();
 }
 
 function clearMassSelection() {
@@ -1786,6 +1828,7 @@ function onMassSelectionPointerDown(ev) {
   const pt = overlayPointFromPointerEvent(ev);
   if (!pt) return;
   ev.preventDefault();
+  ev.stopPropagation();
   massSelectionDragState = {
     pointerId: ev.pointerId,
     startX: pt.x,
@@ -1803,6 +1846,7 @@ function onMassSelectionPointerMove(ev) {
   const pt = overlayPointFromPointerEvent(ev);
   if (!pt) return;
   ev.preventDefault();
+  ev.stopPropagation();
   massSelectionDragState.currentX = pt.x;
   massSelectionDragState.currentY = pt.y;
   renderMassSelectionRect();
@@ -1816,6 +1860,8 @@ function onMassSelectionPointerUp(ev) {
     massSelectionDragState.currentX = pt.x;
     massSelectionDragState.currentY = pt.y;
   }
+  ev.preventDefault();
+  ev.stopPropagation();
   if (massSelectionOverlay?.hasPointerCapture(ev.pointerId)) {
     massSelectionOverlay.releasePointerCapture(ev.pointerId);
   }
@@ -1826,6 +1872,8 @@ function onMassSelectionPointerUp(ev) {
 function onMassSelectionPointerCancel(ev) {
   if (!massSelectionMode || !massSelectionDragState) return;
   if (ev.pointerId !== massSelectionDragState.pointerId) return;
+  ev.preventDefault();
+  ev.stopPropagation();
   if (massSelectionOverlay?.hasPointerCapture(ev.pointerId)) {
     massSelectionOverlay.releasePointerCapture(ev.pointerId);
   }
