@@ -35,6 +35,7 @@ const ui = {
   downloadSvgBtn: el("downloadSvgBtn"),
   showStopsToggle: el("showStopsToggle"),
   showStopsToggleLabel: el("showStopsToggleLabel"),
+  modalBody: el("modalBody"),
   signWrap: el("signWrap"),
   signCanvas: el("signCanvas"),
 };
@@ -185,6 +186,8 @@ function clampPreviewZoom(v) {
 
 function onSignPreviewWheel(e) {
   if (!ui.modal || ui.modal.classList.contains("hidden")) return;
+  // Keep normal wheel scroll behavior unless the user explicitly requests zoom.
+  if (!e.ctrlKey && !e.metaKey) return;
   const rect = ui.signCanvas?.getBoundingClientRect();
   if (!rect || rect.width <= 0 || rect.height <= 0) return;
   if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
@@ -1165,9 +1168,17 @@ function addStopsToMap() {
 
 function openModal() {
   ui.modal.classList.remove("hidden");
+  if (ui.modalBody) {
+    ui.modalBody.scrollTop = 0;
+    ui.modalBody.scrollLeft = 0;
+  }
 }
 function closeModal() {
   ui.modal.classList.add("hidden");
+  if (ui.modalBody) {
+    ui.modalBody.scrollTop = 0;
+    ui.modalBody.scrollLeft = 0;
+  }
   resetPreviewZoom();
 }
 
