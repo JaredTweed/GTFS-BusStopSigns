@@ -1,0 +1,5 @@
+# Local Node dependencies for update_example_pngs.sh
+node_modules/
+package.json
+package-lock.json
+npm-debug.log*
