@@ -39,6 +39,7 @@ const ui = {
   massSelectRegionBtn: el("massSelectRegionBtn"),
   massDownloadFormat: el("massDownloadFormat"),
   massDownloadBtn: el("massDownloadBtn"),
+  massCancelBtn: el("massCancelBtn"),
   massSelectionCount: el("massSelectionCount"),
   massDownloadStatus: el("massDownloadStatus"),
   showStopsToggle: el("showStopsToggle"),
@@ -291,6 +292,7 @@ let massSelectionRectEl = null;
 let massSelectionLayer = null;
 let massSelectionBounds = null;
 let massSelectedStops = [];
+let activeMassDownloadCancelToken = null;
 
 function isCoarsePointerDevice() {
   if (typeof window === "undefined") return false;
@@ -397,6 +399,43 @@ function waitMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, delay));
 }
 
+function createCanceledError(message = "Canceled.") {
+  const err = new Error(String(message || "Canceled."));
+  err.name = "AbortError";
+  err.isCanceled = true;
+  return err;
+}
+
+function isCanceledError(err) {
+  if (!err) return false;
+  return err.name === "AbortError" || err.isCanceled === true;
+}
+
+function throwIfCanceled(cancelToken, fallbackMessage = "Canceled.") {
+  if (!cancelToken?.canceled) return;
+  if (!cancelToken.cancelError) {
+    cancelToken.cancelError = createCanceledError(cancelToken.reason || fallbackMessage);
+  }
+  throw cancelToken.cancelError;
+}
+
+async function waitMsCancellable(ms, cancelToken, fallbackMessage = "Canceled.") {
+  const delay = Math.max(0, Number(ms) || 0);
+  if (delay <= 0) {
+    throwIfCanceled(cancelToken, fallbackMessage);
+    return;
+  }
+  const stepMs = 120;
+  let remaining = delay;
+  while (remaining > 0) {
+    throwIfCanceled(cancelToken, fallbackMessage);
+    const step = Math.min(stepMs, remaining);
+    await waitMs(step);
+    remaining -= step;
+  }
+  throwIfCanceled(cancelToken, fallbackMessage);
+}
+
 function sanitizeFilenamePart(raw, maxLen = 80) {
   const cleaned = String(raw ?? "")
     .trim()
@@ -483,6 +522,15 @@ function setMassDownloadStatus(text) {
   if (ui.massDownloadStatus) ui.massDownloadStatus.textContent = String(text || "");
 }
 
+function requestMassDownloadCancel() {
+  if (!activeMassDownloadCancelToken || activeMassDownloadCancelToken.canceled) return;
+  activeMassDownloadCancelToken.canceled = true;
+  activeMassDownloadCancelToken.reason = "Mass download canceled by user.";
+  signRenderToken += 1;
+  setMassDownloadStatus("Cancel requested. Stopping after the current render step…");
+  updateMassDownloadUi();
+}
+
 function updateMassSelectionCountText() {
   if (!ui.massSelectionCount) return;
   if (massSelectionMode) {
@@ -498,6 +546,8 @@ function updateMassSelectionCountText() {
 
 function updateMassDownloadUi() {
   updateMassSelectionCountText();
+  const canCancelMassDownload = !!activeMassDownloadCancelToken && exportJobInProgress;
+  const cancelRequested = !!activeMassDownloadCancelToken?.canceled;
   if (ui.massSelectRegionBtn) {
     ui.massSelectRegionBtn.disabled = exportJobInProgress;
     ui.massSelectRegionBtn.textContent = massSelectionMode ? "Selecting…" : "Select Region";
@@ -505,6 +555,12 @@ function updateMassDownloadUi() {
   if (ui.massDownloadFormat) ui.massDownloadFormat.disabled = exportJobInProgress;
   if (ui.massDownloadBtn) {
     ui.massDownloadBtn.disabled = exportJobInProgress || massSelectionMode || massSelectedStops.length === 0;
+    ui.massDownloadBtn.hidden = canCancelMassDownload;
+  }
+  if (ui.massCancelBtn) {
+    ui.massCancelBtn.hidden = !canCancelMassDownload;
+    ui.massCancelBtn.disabled = !canCancelMassDownload || cancelRequested;
+    ui.massCancelBtn.textContent = cancelRequested ? "Canceling…" : "Cancel ZIP";
   }
 }
 
@@ -5851,6 +5907,13 @@ function onQrUrlModeHotkey(ev) {
 }
 
 function onGlobalKeyDown(ev) {
+  if (ev.code === "Escape" && activeMassDownloadCancelToken) {
+    if (!isEditableElementTarget(ev.target)) {
+      ev.preventDefault();
+      requestMassDownloadCancel();
+    }
+    return;
+  }
   if (ev.code === "Escape" && massSelectionMode) {
     if (!isEditableElementTarget(ev.target)) {
       ev.preventDefault();
@@ -5970,11 +6033,13 @@ function stopExportContext(stop) {
   };
 }
 
-async function renderStablePngDataUrl(stop, context = null) {
+async function renderStablePngDataUrl(stop, context = null, cancelToken = null) {
   const exportContext = context || stopExportContext(stop);
   let previousDataUrl = "";
+  const cancelMessage = `Mass download canceled while rendering PNG for ${stopDisplayLabel(stop)}.`;
 
   for (let attempt = 1; attempt <= EXPORT_MAX_RENDER_ATTEMPTS; attempt += 1) {
+    throwIfCanceled(cancelToken, cancelMessage);
     const renderToken = ++signRenderToken;
     await drawSign({
       stop,
@@ -5985,18 +6050,19 @@ async function renderStablePngDataUrl(stop, context = null) {
       outputScale: exportContext.outputScale,
       showStops: exportContext.showStops,
     });
+    throwIfCanceled(cancelToken, cancelMessage);
     if (renderToken !== signRenderToken) {
       throw new Error(`Render for ${stopDisplayLabel(stop)} was superseded.`);
     }
 
-    await waitMs(EXPORT_RENDER_SETTLE_MS);
+    await waitMsCancellable(EXPORT_RENDER_SETTLE_MS, cancelToken, cancelMessage);
     const currentDataUrl = ui.signCanvas.toDataURL("image/png");
     if (previousDataUrl && currentDataUrl === previousDataUrl) {
       return { dataUrl: currentDataUrl, attempts: attempt };
     }
     previousDataUrl = currentDataUrl;
     if (attempt < EXPORT_MAX_RENDER_ATTEMPTS) {
-      await waitMs(EXPORT_STABILIZE_PAUSE_MS);
+      await waitMsCancellable(EXPORT_STABILIZE_PAUSE_MS, cancelToken, cancelMessage);
     }
   }
 
@@ -6005,11 +6071,13 @@ async function renderStablePngDataUrl(stop, context = null) {
   );
 }
 
-async function renderStableSvgMarkup(stop, context = null) {
+async function renderStableSvgMarkup(stop, context = null, cancelToken = null) {
   const exportContext = context || stopExportContext(stop);
   let previousSvg = "";
+  const cancelMessage = `Mass download canceled while rendering SVG for ${stopDisplayLabel(stop)}.`;
 
   for (let attempt = 1; attempt <= EXPORT_MAX_RENDER_ATTEMPTS; attempt += 1) {
+    throwIfCanceled(cancelToken, cancelMessage);
     const currentSvg = await buildSignSvg({
       stop,
       items: exportContext.items,
@@ -6018,12 +6086,13 @@ async function renderStableSvgMarkup(stop, context = null) {
       outputScale: exportContext.outputScale,
       showStops: exportContext.showStops,
     });
+    throwIfCanceled(cancelToken, cancelMessage);
     if (previousSvg && currentSvg === previousSvg) {
       return { svg: currentSvg, attempts: attempt };
     }
     previousSvg = currentSvg;
     if (attempt < EXPORT_MAX_RENDER_ATTEMPTS) {
-      await waitMs(EXPORT_STABILIZE_PAUSE_MS);
+      await waitMsCancellable(EXPORT_STABILIZE_PAUSE_MS, cancelToken, cancelMessage);
     }
   }
 
@@ -6065,13 +6134,17 @@ async function downloadSelectedStopAsSvg() {
   }
 }
 
-async function buildMassDownloadZip(stopsToExport, format) {
+async function buildMassDownloadZip(stopsToExport, format, cancelToken = null) {
   const targetFormat = format === "svg" ? "svg" : "png";
   const total = stopsToExport.length;
   const zip = new JSZip();
   const usedNames = new Set();
+  const cancelMessage = "Mass download canceled during ZIP generation.";
+
+  throwIfCanceled(cancelToken, cancelMessage);
 
   for (let i = 0; i < total; i += 1) {
+    throwIfCanceled(cancelToken, cancelMessage);
     const stop = stopsToExport[i];
     const renderPct = 5 + ((i / total) * 85);
     setProgress(renderPct, `Rendering ${targetFormat.toUpperCase()} ${i + 1}/${total}: ${stopDisplayLabel(stop)}…`);
@@ -6079,16 +6152,17 @@ async function buildMassDownloadZip(stopsToExport, format) {
     const filename = uniqueFilename(buildStopExportFilename(stop, targetFormat), usedNames);
 
     if (targetFormat === "png") {
-      const { dataUrl } = await renderStablePngDataUrl(stop, context);
+      const { dataUrl } = await renderStablePngDataUrl(stop, context, cancelToken);
       const base64 = pngDataUrlToBase64(dataUrl);
       if (!base64) throw new Error(`Failed to encode PNG for ${stopDisplayLabel(stop)}.`);
       zip.file(filename, base64, { base64: true });
     } else {
-      const { svg } = await renderStableSvgMarkup(stop, context);
+      const { svg } = await renderStableSvgMarkup(stop, context, cancelToken);
       zip.file(filename, svg);
     }
   }
 
+  throwIfCanceled(cancelToken, cancelMessage);
   setProgress(92, `Creating ${targetFormat.toUpperCase()} ZIP…`);
   const zipBlob = await zip.generateAsync(
     {
@@ -6097,12 +6171,14 @@ async function buildMassDownloadZip(stopsToExport, format) {
       compressionOptions: { level: 6 },
     },
     (meta) => {
+      throwIfCanceled(cancelToken, cancelMessage);
       const p = Math.max(0, Math.min(100, Number(meta?.percent) || 0));
       const pct = 92 + (p * 0.08);
       setProgress(pct, `Creating ${targetFormat.toUpperCase()} ZIP… ${Math.round(p)}%`);
     },
   );
 
+  throwIfCanceled(cancelToken, cancelMessage);
   return zipBlob;
 }
 
@@ -6120,17 +6196,29 @@ async function downloadSelectedRegionZip() {
   const stopsToExport = massSelectedStops.slice();
   const restoreStop = selectedStop;
   const restoreSummary = selectedStopRouteSummary;
+  const cancelToken = { canceled: false, reason: "", cancelError: null };
 
   setMassSelectionMode(false);
+  activeMassDownloadCancelToken = cancelToken;
   setExportJobInProgress(true);
   try {
     setMassDownloadStatus(`Preparing ${niceInt(stopsToExport.length)} ${format.toUpperCase()} file${stopsToExport.length === 1 ? "" : "s"}…`);
-    const zipBlob = await buildMassDownloadZip(stopsToExport, format);
+    const zipBlob = await buildMassDownloadZip(stopsToExport, format, cancelToken);
     const zipName = buildMassZipFilename(format, stopsToExport.length);
     triggerBlobDownload(zipName, zipBlob);
     setMassDownloadStatus(`Downloaded ${zipName}`);
     setProgress(100, "Ready. Click a stop.");
+  } catch (err) {
+    if (isCanceledError(err)) {
+      setMassDownloadStatus("Mass download canceled.");
+      setProgress(100, "Ready. Click a stop.");
+      return;
+    }
+    throw err;
   } finally {
+    if (activeMassDownloadCancelToken === cancelToken) {
+      activeMassDownloadCancelToken = null;
+    }
     if (restoreStop) {
       selectedStop = restoreStop;
       selectedStopRouteSummary = restoreSummary;
@@ -6178,11 +6266,16 @@ ui.massDownloadBtn?.addEventListener("click", async () => {
   try {
     await downloadSelectedRegionZip();
   } catch (err) {
+    if (isCanceledError(err)) return;
     console.error(err);
     setProgress(100, "Ready. Click a stop.");
     setMassDownloadStatus(`Mass download failed: ${err?.message || err}`);
     alert("Mass download failed. Try again in a moment.");
   }
+});
+
+ui.massCancelBtn?.addEventListener("click", () => {
+  requestMassDownloadCancel();
 });
 
 ui.copyBtn.addEventListener("click", async () => {
