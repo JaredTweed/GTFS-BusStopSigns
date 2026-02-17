@@ -1,9 +1,9 @@
-name: Weekly GTFS Preload Update
+name: Daily GTFS Preload Update
 
 on:
   schedule:
-    # Every Monday at 10:00 UTC
-    - cron: "0 10 * * 1"
+    # Every day at 10:00 UTC
+    - cron: "0 10 * * *"
   workflow_dispatch:
 
 permissions:
@@ -40,5 +40,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add google_transit.zip preloaded_route_summaries.json google_transit
-          git commit -m "chore: weekly GTFS preload update"
+          git commit -m "chore: daily GTFS preload update"
           git push
