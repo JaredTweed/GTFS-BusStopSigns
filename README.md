@@ -17,7 +17,3 @@ I heard that the largest reason for poor signage is due to the frequency of how 
 ![#54997.png](examples/%2354997.png)
 
 ![#62012.png](examples/%2362012.png)
-
-## TODO
-
-- Mass download of bus signs for large areas.
