@@ -113,8 +113,7 @@ const SIGN_HEADER_QR_FRAME_PAD = 6;
 const SIGN_HEADER_QR_EXPORT_SIZE = 512;
 const SIGN_HEADER_QR_CAPTION_LINE_HEIGHT = 16;
 const SIGN_HEADER_QR_CAPTION_LINES = [
-  "Scan to see time",
-  "until buses arrive",
+  "Scan for arrival times",
 ];
 const SIGN_ROUTE_LINE_WIDTH_RULES = [
   { minGroupCount: 5, width: 17 },

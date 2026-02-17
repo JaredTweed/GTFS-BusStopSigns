@@ -86,7 +86,7 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
   .side { display: none; }
 }
 
-@media (max-width: 980px) {
+/* @media (max-width: 980px) { */
   .modal__panel {
     margin: 12px;
     width: min(480px, calc(100vw - 24px));
@@ -94,7 +94,7 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
     max-height: min(860px, calc(100vh - 24px));
     max-height: min(860px, calc(100dvh - 24px));
   }
-}
+/* } */
 
 @media (max-width: 500px) {
   #copyBtn { display: none; }
