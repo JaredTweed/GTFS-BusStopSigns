@@ -271,6 +271,9 @@ let signVectorMap = null;
 let signVectorUnavailable = false;
 let signVectorRoadLabelBaseSizeByLayer = new Map();
 let signVectorRoadLabelLastFactor = null;
+let progressTargetPct = 0;
+let progressRenderedPct = 0;
+let progressAnimationFrame = 0;
 
 function isCoarsePointerDevice() {
   if (typeof window === "undefined") return false;
@@ -323,9 +326,8 @@ function onSignPreviewWheel(e) {
 function setProgress(pct, text) {
   const clampedPct = Math.max(0, Math.min(100, pct));
   const message = String(text ?? "");
-  ui.progressBar.style.width = `${clampedPct}%`;
+  progressTargetPct = clampedPct;
   ui.progressText.textContent = message;
-  if (ui.topProgressBar) ui.topProgressBar.style.width = `${clampedPct}%`;
   if (ui.topProgressText) ui.topProgressText.textContent = message;
 
   const lower = message.trim().toLowerCase();
@@ -333,6 +335,34 @@ function setProgress(pct, text) {
   const isError = lower.startsWith("error:");
   const showTopProgress = (clampedPct < 100 && !isReady) || isError;
   if (ui.topProgress) ui.topProgress.classList.toggle("hidden", !showTopProgress);
+
+  if (progressAnimationFrame === 0) {
+    progressAnimationFrame = window.requestAnimationFrame(tickProgressAnimation);
+  }
+}
+
+function applyProgressWidth(pct) {
+  const width = `${pct.toFixed(2)}%`;
+  if (ui.progressBar) ui.progressBar.style.width = width;
+  if (ui.topProgressBar) ui.topProgressBar.style.width = width;
+}
+
+function tickProgressAnimation() {
+  progressAnimationFrame = 0;
+  const delta = progressTargetPct - progressRenderedPct;
+  if (Math.abs(delta) <= 0.05) {
+    progressRenderedPct = progressTargetPct;
+    applyProgressWidth(progressRenderedPct);
+    return;
+  }
+
+  // Ease toward the target so loading appears continuous even when updates are coarse.
+  const step = Math.sign(delta) * Math.max(0.28, Math.abs(delta) * 0.14);
+  progressRenderedPct += step;
+  if (step > 0 && progressRenderedPct > progressTargetPct) progressRenderedPct = progressTargetPct;
+  if (step < 0 && progressRenderedPct < progressTargetPct) progressRenderedPct = progressTargetPct;
+  applyProgressWidth(progressRenderedPct);
+  progressAnimationFrame = window.requestAnimationFrame(tickProgressAnimation);
 }
 
 function niceInt(x) {
