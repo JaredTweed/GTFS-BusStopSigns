@@ -79,10 +79,19 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
 .signWrap { display:flex; justify-content:center; align-items: center; flex: 1; min-height: 0; overflow: hidden; }
 #signCanvas { max-width: 100%; max-height: 100%; width: auto; height: auto; border: 1px solid #eee; border-radius: 12px; background:#fff; transform-origin: center center; will-change: transform; }
 
+@media (max-width: 1249px) {
+  .layout { grid-template-columns: 1fr; }
+  .side { display: none; }
+}
+
 @media (max-width: 980px) {
   .modal__panel {
     margin: 12px;
     width: calc(100vw - 24px);
     height: calc(100vh - 24px);
   }
+}
+
+@media (max-width: 499px) {
+  #copyBtn { display: none; }
 }
