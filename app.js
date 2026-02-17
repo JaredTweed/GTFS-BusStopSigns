@@ -62,6 +62,7 @@ let stopTripTimes = new Map();// stop_id -> Map(trip_id -> departure seconds)
 let shapesById = new Map(); // shape_id -> [[lat, lon], ...]
 let serviceActiveWeekdaysById = new Map(); // service_id -> Set(weekday index, 0=Sun..6=Sat)
 let hasServiceCalendarData = false;
+let useTransLinkStopScheduleUrl = false;
 
 // Selected stop
 let selectedStop = null;
@@ -340,6 +341,64 @@ function onSignPreviewWheel(e) {
   if (Math.abs(next - previewZoomScale) < 1e-4) return;
   previewZoomScale = next;
   applyPreviewZoom();
+}
+
+function getSignCanvasPointFromMouseEvent(ev) {
+  const canvas = ui.signCanvas;
+  if (!canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+  const relX = (ev.clientX - rect.left) / rect.width;
+  const relY = (ev.clientY - rect.top) / rect.height;
+  if (!Number.isFinite(relX) || !Number.isFinite(relY)) return null;
+  if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return null;
+  return {
+    x: relX * canvas.width,
+    y: relY * canvas.height,
+  };
+}
+
+function isCanvasPointInsideQrArea(canvasPoint) {
+  if (!canvasPoint || !selectedStop) return false;
+  const canvas = ui.signCanvas;
+  if (!canvas || canvas.width <= 0 || canvas.height <= 0) return false;
+  const qrLayout = getSignLayoutGeometry({
+    width: SIGN_TEMPLATE.size.width,
+    height: SIGN_TEMPLATE.size.height,
+  }).qrLayout;
+  const scaleX = canvas.width / SIGN_TEMPLATE.size.width;
+  const scaleY = canvas.height / SIGN_TEMPLATE.size.height;
+  const tolerance = isCoarsePointerDevice() ? TOUCH_CANVAS_TOLERANCE : DEFAULT_CANVAS_TOLERANCE;
+  const x = canvasPoint.x / scaleX;
+  const y = canvasPoint.y / scaleY;
+  return (
+    x >= (qrLayout.frameX - tolerance)
+    && x <= (qrLayout.frameX + qrLayout.frameSize + tolerance)
+    && y >= (qrLayout.frameY - tolerance)
+    && y <= (qrLayout.frameY + qrLayout.frameSize + tolerance)
+  );
+}
+
+function updateSignCanvasCursor(ev) {
+  const canvas = ui.signCanvas;
+  if (!canvas) return;
+  if (!ui.modal || ui.modal.classList.contains("hidden")) {
+    canvas.style.cursor = "";
+    return;
+  }
+  const point = getSignCanvasPointFromMouseEvent(ev);
+  canvas.style.cursor = isCanvasPointInsideQrArea(point) ? "pointer" : "";
+}
+
+function onSignCanvasClick(ev) {
+  if (!ui.modal || ui.modal.classList.contains("hidden")) return;
+  const stop = selectedStop;
+  if (!stop) return;
+  const point = getSignCanvasPointFromMouseEvent(ev);
+  if (!isCanvasPointInsideQrArea(point)) return;
+  const targetUrl = buildGoogleMapsStopUrl(stop);
+  if (!targetUrl) return;
+  window.open(targetUrl, "_blank", "noopener,noreferrer");
 }
 
 function setProgress(pct, text) {
@@ -626,6 +685,10 @@ function buildGoogleMapsStopQueryName(stopNameRaw) {
 function buildGoogleMapsStopUrl(stop) {
   const stopCode = String(stop?.stop_code || "").trim();
   const stopId = String(stop?.stop_id || "").trim();
+  const stopCodeOrId = stopCode || stopId;
+  if (useTransLinkStopScheduleUrl && stopCodeOrId) {
+    return `https://www.translink.ca/schedules-and-maps/stop/${encodeURIComponent(stopCodeOrId)}/schedule`;
+  }
   const lat = safeParseFloat(stop?.stop_lat);
   const lon = safeParseFloat(stop?.stop_lon);
   const name = buildGoogleMapsStopQueryName(stop?.stop_name);
@@ -1900,12 +1963,18 @@ function closeModal() {
     ui.modalBody.scrollTop = 0;
     ui.modalBody.scrollLeft = 0;
   }
+  if (ui.signCanvas) ui.signCanvas.style.cursor = "";
   resetPreviewZoom();
 }
 
 ui.modalBackdrop.addEventListener("click", closeModal);
 ui.closeModal.addEventListener("click", closeModal);
 ui.signWrap?.addEventListener("wheel", onSignPreviewWheel, { passive: false });
+ui.signCanvas?.addEventListener("mousemove", updateSignCanvasCursor);
+ui.signCanvas?.addEventListener("mouseleave", () => {
+  if (ui.signCanvas) ui.signCanvas.style.cursor = "";
+});
+ui.signCanvas?.addEventListener("click", onSignCanvasClick);
 window.addEventListener("keydown", onGlobalKeyDown);
 
 function normalizeColor(hex, fallback="#333333") {
@@ -6511,6 +6580,7 @@ async function boot({ zipUrl, zipFile, zipName }) {
   shapesById = new Map();
   serviceActiveWeekdaysById = new Map();
   hasServiceCalendarData = false;
+  useTransLinkStopScheduleUrl = false;
   feedUpdatedDateLabel = "";
   feedUpdatedDateKey = null;
   signVectorUnavailable = false;
@@ -6551,6 +6621,11 @@ async function boot({ zipUrl, zipFile, zipName }) {
         console.warn("Failed to parse feed_info.txt for update date.", err);
       }
     }
+    if (generationAtStart !== bootGeneration) return;
+
+    // Only the built-in preloaded GTFS should use TransLink stop schedule links.
+    // User-uploaded feeds always use Google Maps URLs.
+    useTransLinkStopScheduleUrl = !zipFile && zipName === "google_transit.zip";
     if (generationAtStart !== bootGeneration) return;
 
     // 2) start shapes parsing in worker so it can overlap with later GTFS steps.
