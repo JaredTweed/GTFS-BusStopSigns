@@ -22,6 +22,9 @@ const ui = {
   indexCount: el("indexCount"),
   progressBar: el("progressBar"),
   progressText: el("progressText"),
+  topProgress: el("topProgress"),
+  topProgressBar: el("topProgressBar"),
+  topProgressText: el("topProgressText"),
   reloadBtn: el("reloadBtn"),
   updatesStatus: el("updatesStatus"),
   gtfsFile: el("gtfsFile"),
@@ -318,8 +321,18 @@ function onSignPreviewWheel(e) {
 }
 
 function setProgress(pct, text) {
-  ui.progressBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-  ui.progressText.textContent = text;
+  const clampedPct = Math.max(0, Math.min(100, pct));
+  const message = String(text ?? "");
+  ui.progressBar.style.width = `${clampedPct}%`;
+  ui.progressText.textContent = message;
+  if (ui.topProgressBar) ui.topProgressBar.style.width = `${clampedPct}%`;
+  if (ui.topProgressText) ui.topProgressText.textContent = message;
+
+  const lower = message.trim().toLowerCase();
+  const isReady = lower.startsWith("ready.");
+  const isError = lower.startsWith("error:");
+  const showTopProgress = (clampedPct < 100 && !isReady) || isError;
+  if (ui.topProgress) ui.topProgress.classList.toggle("hidden", !showTopProgress);
 }
 
 function niceInt(x) {
