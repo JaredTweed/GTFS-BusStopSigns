@@ -58,9 +58,12 @@ let selectedStop = null;
 let selectedStopRouteSummary = null;
 let signRenderToken = 0;
 const tileImageCache = new Map();
+const headerQrCodeDataUrlCache = new Map();
+const sourceImageCache = new Map();
 let routeSummaryCache = new Map(); // `${stop_id}::${direction}` -> summary array
 let preloadedStopOverlayByStop = new Map(); // stop_id -> Map(route_id::shape_id -> [downstream_stop_id...])
 let showStopsOnSign = true;
+let useCenteredQrMapUrl = true;
 let activeZip = null;
 let bootGeneration = 0;
 let feedUpdatedDateLabel = "";
@@ -103,6 +106,16 @@ const SIGN_VECTOR_ROAD_LABEL_HALO_WIDTH = 1.2;
 const SIGN_VECTOR_NON_ROAD_LABEL_SIZE_SCALE = 1.48;
 const SIGN_VECTOR_GL_ZOOM_OFFSET = -1;
 const SIGN_BASEMAP_OPACITY = 0.86;
+const SIGN_HEADER_HEIGHT = 220;
+const SIGN_HEADER_QR_Y = 32;
+const SIGN_HEADER_QR_SIZE = 120;
+const SIGN_HEADER_QR_FRAME_PAD = 6;
+const SIGN_HEADER_QR_EXPORT_SIZE = 512;
+const SIGN_HEADER_QR_CAPTION_LINE_HEIGHT = 16;
+const SIGN_HEADER_QR_CAPTION_LINES = [
+  "Scan to see time",
+  "until buses arrive",
+];
 const SIGN_ROUTE_LINE_WIDTH_RULES = [
   { minGroupCount: 5, width: 17 },
   { minGroupCount: 4, width: 15 },
@@ -134,6 +147,13 @@ const SHAPES_WORKER_URL = "./shapes_worker.js";
 const TRANSLINK_LATEST_GTFS_URL = "https://gtfs-static.translink.ca/gtfs/google_transit.zip";
 const FIXED_DIRECTION_FILTER = "all";
 const FIXED_EXPORT_SCALE = 3;
+const QR_URL_MODE_TOGGLE_KEY = "KeyY";
+const DIRECTION_PREFIX_BY_WORD = new Map([
+  ["eastbound", "EB"],
+  ["westbound", "WB"],
+  ["northbound", "NB"],
+  ["southbound", "SB"],
+]);
 const PREVIEW_ZOOM_MIN = 1;
 const PREVIEW_ZOOM_MAX = 5;
 const PREVIEW_ZOOM_STEP = 1.12;
@@ -193,6 +213,166 @@ function niceInt(x) {
 function safeParseFloat(x) {
   const v = Number.parseFloat(x);
   return Number.isFinite(v) ? v : null;
+}
+
+function buildGoogleMapsStopQueryName(stopNameRaw) {
+  const stopName = String(stopNameRaw || "").trim();
+  if (!stopName) return "";
+  if (/^(EB|WB|NB|SB)\b/i.test(stopName)) return stopName;
+
+  const m = stopName.match(/^(Eastbound|Westbound|Northbound|Southbound)\b/i);
+  if (!m) return stopName;
+  const abbr = DIRECTION_PREFIX_BY_WORD.get(m[1].toLowerCase());
+  if (!abbr) return stopName;
+  // Prefix directional abbreviation while keeping the full stop name to improve match quality.
+  return `${abbr} ${stopName}`;
+}
+
+function buildGoogleMapsStopUrl(stop) {
+  const stopCode = String(stop?.stop_code || "").trim();
+  const stopId = String(stop?.stop_id || "").trim();
+  const lat = safeParseFloat(stop?.stop_lat);
+  const lon = safeParseFloat(stop?.stop_lon);
+  const name = buildGoogleMapsStopQueryName(stop?.stop_name);
+  const queryParts = [];
+  if (name) queryParts.push(name);
+  if (stopCode) queryParts.push(stopCode);
+  else if (stopId) queryParts.push(stopId);
+  const query = queryParts.join(" ").trim() || "Bus stop";
+
+  if (useCenteredQrMapUrl && lat != null && lon != null) {
+    // Bias search to this exact stop coordinate to reduce wrong-stop matches.
+    return `https://www.google.com/maps/search/${encodeURIComponent(query)}/@${lat.toFixed(6)},${lon.toFixed(6)},20z`;
+  }
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
+function getSignHeaderQrLayout(width, pad) {
+  const size = SIGN_HEADER_QR_SIZE;
+  const x = width - pad - size;
+  const y = SIGN_HEADER_QR_Y;
+  const framePad = SIGN_HEADER_QR_FRAME_PAD;
+  return {
+    x,
+    y,
+    size,
+    frameX: x - framePad,
+    frameY: y - framePad,
+    frameSize: size + (framePad * 2),
+    captionX: x + (size / 2),
+    captionStartY: y + size + 20,
+  };
+}
+
+function drawHeaderQrFallbackOnCanvas(ctx, qrLayout) {
+  ctx.fillStyle = "#eef2ff";
+  roundRect(ctx, qrLayout.x, qrLayout.y, qrLayout.size, qrLayout.size, 10, true, false);
+  ctx.fillStyle = "#1e3a8a";
+  ctx.font = "900 24px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("QR", qrLayout.x + (qrLayout.size / 2), qrLayout.y + (qrLayout.size / 2));
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+function loadImageFromSource(src) {
+  const key = String(src || "");
+  if (!key) return Promise.reject(new Error("Missing image source"));
+  if (sourceImageCache.has(key)) return sourceImageCache.get(key);
+  const p = new Promise((resolve, reject) => {
+    const img = new Image();
+    if (/^https?:\/\//i.test(key)) img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Image load failed"));
+    img.src = key;
+  });
+  sourceImageCache.set(key, p);
+  p.catch(() => sourceImageCache.delete(key));
+  return p;
+}
+
+function buildQrCodeDataUrl(text, size) {
+  const qrGlobal = window.QRCode;
+  if (!qrGlobal) {
+    return Promise.reject(new Error("QRCode library not available"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const host = document.createElement("div");
+    host.style.position = "fixed";
+    host.style.left = "-99999px";
+    host.style.top = "-99999px";
+    host.style.width = "1px";
+    host.style.height = "1px";
+    host.style.overflow = "hidden";
+    document.body.appendChild(host);
+
+    const cleanup = () => {
+      try { host.remove(); } catch {}
+    };
+
+    try {
+      // eslint-disable-next-line no-new
+      new qrGlobal(host, {
+        text,
+        width: size,
+        height: size,
+        colorDark: "#000000",
+        colorLight: "#ffffff",
+        correctLevel: qrGlobal.CorrectLevel?.M ?? 0,
+      });
+    } catch (err) {
+      cleanup();
+      reject(err instanceof Error ? err : new Error("QR code generation failed"));
+      return;
+    }
+
+    const finish = () => {
+      const canvas = host.querySelector("canvas");
+      if (canvas) {
+        const dataUrl = canvas.toDataURL("image/png");
+        cleanup();
+        resolve(dataUrl);
+        return;
+      }
+
+      const img = host.querySelector("img");
+      if (img?.src) {
+        if (img.complete) {
+          const src = img.src;
+          cleanup();
+          resolve(src);
+          return;
+        }
+        img.onload = () => {
+          const src = img.src;
+          cleanup();
+          resolve(src);
+        };
+        img.onerror = () => {
+          cleanup();
+          reject(new Error("QR code image failed to load"));
+        };
+        return;
+      }
+
+      cleanup();
+      reject(new Error("QR code render did not return an image"));
+    };
+
+    requestAnimationFrame(finish);
+  });
+}
+
+function getStopQrCodeDataUrl(stop, size = SIGN_HEADER_QR_EXPORT_SIZE) {
+  const targetUrl = buildGoogleMapsStopUrl(stop);
+  const cacheKey = `${size}::${targetUrl}`;
+  if (headerQrCodeDataUrlCache.has(cacheKey)) return headerQrCodeDataUrlCache.get(cacheKey);
+  const p = buildQrCodeDataUrl(targetUrl, size);
+  headerQrCodeDataUrlCache.set(cacheKey, p);
+  p.catch(() => headerQrCodeDataUrlCache.delete(cacheKey));
+  return p;
 }
 
 function parseGtfsTimeToSeconds(v) {
@@ -995,6 +1175,7 @@ function closeModal() {
 ui.modalBackdrop.addEventListener("click", closeModal);
 ui.closeModal.addEventListener("click", closeModal);
 ui.signWrap?.addEventListener("wheel", onSignPreviewWheel, { passive: false });
+window.addEventListener("keydown", onQrUrlModeHotkey);
 
 function normalizeColor(hex, fallback="#333333") {
   if (!hex) return fallback;
@@ -4630,7 +4811,7 @@ async function drawSign({
 
   // Header area
   const pad = 50;
-  const headerH = 170;
+  const headerH = SIGN_HEADER_HEIGHT;
 
   ctx.fillStyle = "#111111";
   ctx.font = "900 56px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
@@ -4642,17 +4823,42 @@ async function drawSign({
   ctx.fillStyle = "#333333";
   ctx.fillText(code, pad, 120);
 
-  // Simple "T" block like the examples (placeholder)
-  const tX = W - pad - 110, tY = 35, tS = 110;
-  ctx.fillStyle = "#2b6dff";
-  roundRect(ctx, tX, tY, tS, tS, 18, true, false);
+  const qrLayout = getSignHeaderQrLayout(W, pad);
   ctx.fillStyle = "#ffffff";
-  ctx.font = "900 72px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+  ctx.strokeStyle = "#111111";
+  ctx.lineWidth = 2;
+  roundRect(ctx, qrLayout.frameX, qrLayout.frameY, qrLayout.frameSize, qrLayout.frameSize, 12, true, true);
+
+  let qrDataUrl = "";
+  try {
+    qrDataUrl = await getStopQrCodeDataUrl(stop);
+  } catch (err) {
+    console.warn("Failed to generate stop QR code.", err);
+  }
+  if (renderToken !== signRenderToken) return;
+
+  if (qrDataUrl) {
+    try {
+      const qrImg = await loadImageFromSource(qrDataUrl);
+      if (renderToken !== signRenderToken) return;
+      ctx.drawImage(qrImg, qrLayout.x, qrLayout.y, qrLayout.size, qrLayout.size);
+    } catch (err) {
+      console.warn("Failed to load stop QR image.", err);
+      drawHeaderQrFallbackOnCanvas(ctx, qrLayout);
+    }
+  } else {
+    drawHeaderQrFallbackOnCanvas(ctx, qrLayout);
+  }
+
+  ctx.fillStyle = "#4b5563";
+  ctx.font = "600 13px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
   ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("T", tX + tS/2, tY + tS/2 + 3);
-  ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
+  for (let i = 0; i < SIGN_HEADER_QR_CAPTION_LINES.length; i += 1) {
+    const y = qrLayout.captionStartY + (i * SIGN_HEADER_QR_CAPTION_LINE_HEIGHT);
+    ctx.fillText(SIGN_HEADER_QR_CAPTION_LINES[i], qrLayout.captionX, y);
+  }
+  ctx.textAlign = "left";
 
   // Stop name / direction label
   const subtitle = `${stop.stop_name || "—"}`;
@@ -4724,7 +4930,7 @@ async function buildSignSvg({
   const W = 900;
   const H = 1200;
   const pad = 50;
-  const headerH = 170;
+  const headerH = SIGN_HEADER_HEIGHT;
   const mapTop = headerH + 30;
   const mapY = mapTop + 6;
   const footerY = H - 40;
@@ -4785,6 +4991,20 @@ async function buildSignSvg({
   const stopPt = (stopLat != null && stopLon != null) ? project(stopLat, stopLon) : null;
   const subtitle = `${stop.stop_name || "—"}`;
   const code = stop.stop_code ? `#${stop.stop_code}` : `#${stop.stop_id}`;
+  const qrLayout = getSignHeaderQrLayout(W, pad);
+  let qrDataUrl = "";
+  try {
+    qrDataUrl = await getStopQrCodeDataUrl(stop);
+  } catch (err) {
+    console.warn("Failed to generate stop QR code for SVG export.", err);
+  }
+  const qrCaptionSvg = SIGN_HEADER_QR_CAPTION_LINES.map((line, idx) => {
+    const y = qrLayout.captionStartY + (idx * SIGN_HEADER_QR_CAPTION_LINE_HEIGHT);
+    return `<text x="${qrLayout.captionX.toFixed(2)}" y="${y.toFixed(2)}" text-anchor="middle" fill="#4b5563" font-size="13" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(line)}</text>`;
+  }).join("");
+  const qrImageSvg = qrDataUrl
+    ? `<image href="${qrDataUrl}" x="${qrLayout.x.toFixed(2)}" y="${qrLayout.y.toFixed(2)}" width="${qrLayout.size.toFixed(2)}" height="${qrLayout.size.toFixed(2)}" />`
+    : `<g><rect x="${qrLayout.x.toFixed(2)}" y="${qrLayout.y.toFixed(2)}" width="${qrLayout.size.toFixed(2)}" height="${qrLayout.size.toFixed(2)}" rx="10" fill="#eef2ff" /><text x="${qrLayout.captionX.toFixed(2)}" y="${(qrLayout.y + (qrLayout.size / 2) + 8).toFixed(2)}" text-anchor="middle" fill="#1e3a8a" font-size="24" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">QR</text></g>`;
 
   const mapClipId = "mapClip";
   const mapTileSvg = [];
@@ -4910,8 +5130,9 @@ async function buildSignSvg({
   <rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff" />
   <text x="${pad}" y="80" fill="#111111" font-size="56" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Bus Stop</text>
   <text x="${pad}" y="120" fill="#333333" font-size="28" font-weight="700" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(code)}</text>
-  <rect x="${W - pad - 110}" y="35" width="110" height="110" rx="18" fill="#2b6dff" />
-  <text x="${W - pad - 55}" y="109" text-anchor="middle" fill="#ffffff" font-size="72" font-weight="900" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">T</text>
+  <rect x="${qrLayout.frameX.toFixed(2)}" y="${qrLayout.frameY.toFixed(2)}" width="${qrLayout.frameSize.toFixed(2)}" height="${qrLayout.frameSize.toFixed(2)}" rx="12" fill="#ffffff" stroke="#111111" stroke-width="2" />
+  ${qrImageSvg}
+  ${qrCaptionSvg}
   <text x="${pad}" y="${headerH}" fill="#666666" font-size="22" font-weight="600" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">${escXml(subtitle)}</text>
   <text x="${pad}" y="${mapTop - 8}" fill="#111111" font-size="24" font-weight="800" font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial">Route map (from this stop onward)</text>
   <rect x="${mapOuterX}" y="${mapOuterY}" width="${mapOuterW}" height="${mapOuterH}" rx="14" fill="#fafafa" stroke="#dddddd" />
@@ -4964,6 +5185,27 @@ function syncShowStopsToggleUi() {
   if (ui.showStopsToggleLabel) {
     ui.showStopsToggleLabel.textContent = isOn ? "Hide Stops" : "Show Stops";
   }
+}
+
+function isEditableElementTarget(target) {
+  const elTarget = target instanceof Element ? target : null;
+  if (!elTarget) return false;
+  if (elTarget.closest("input, textarea, select")) return true;
+  return !!elTarget.closest("[contenteditable='true']");
+}
+
+function toggleQrUrlMode() {
+  useCenteredQrMapUrl = !useCenteredQrMapUrl;
+  console.log(`QR URL mode: ${useCenteredQrMapUrl ? "Centered" : "Plain api=1"} (Ctrl+Shift+Y to toggle)`);
+  rerenderSelectedStopSign();
+}
+
+function onQrUrlModeHotkey(ev) {
+  if (!ev.ctrlKey || !ev.shiftKey || ev.altKey || ev.metaKey) return;
+  if (ev.code !== QR_URL_MODE_TOGGLE_KEY) return;
+  if (isEditableElementTarget(ev.target)) return;
+  ev.preventDefault();
+  toggleQrUrlMode();
 }
 
 function openStop(stop) {
