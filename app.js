@@ -106,7 +106,7 @@ const SIGN_VECTOR_ROAD_LABEL_HALO_WIDTH = 1.2;
 const SIGN_VECTOR_NON_ROAD_LABEL_SIZE_SCALE = 1.48;
 const SIGN_VECTOR_GL_ZOOM_OFFSET = -1;
 const SIGN_BASEMAP_OPACITY = 0.86;
-const SIGN_HEADER_HEIGHT = 220;
+const SIGN_HEADER_HEIGHT = 180;
 const SIGN_HEADER_QR_Y = 32;
 const SIGN_HEADER_QR_SIZE = 120;
 const SIGN_HEADER_QR_FRAME_PAD = 6;
@@ -5229,7 +5229,7 @@ function openStop(stop) {
   const signW = 900;
   const signH = 1200;
   const signPad = 50;
-  const headerH = 170;
+  const headerH = SIGN_HEADER_HEIGHT;
   const mapTop = headerH + 30;
   const mapY = mapTop + 6;
   const footerY = signH - 40;
