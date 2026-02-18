@@ -165,7 +165,7 @@ const SIGN_TEMPLATE = Object.freeze({
     baselineInset: 40,
   }),
   legend: Object.freeze({
-    maxItems: 6,
+    maxItems: Number.POSITIVE_INFINITY,
     maxHeight: 220,
     lineHeight: 16,
     itemGap: 2,
