@@ -1333,6 +1333,30 @@ function estimateLegendHeight(segments, maxSegments = 6) {
   return Math.max(56, 10 + (lineCount * perLine) + (Math.max(0, use.length - 1) * itemGap));
 }
 
+function routeSortMetaFromLegendEntry(seg) {
+  const raw = String(seg?.route_short_name || seg?.display_name || "").trim();
+  const firstPart = raw.split("+")[0]?.trim() || raw;
+  const m = firstPart.match(/\d+/);
+  const num = m ? Number.parseInt(m[0], 10) : Number.NaN;
+  return {
+    raw,
+    num,
+    isNum: Number.isFinite(num),
+  };
+}
+
+function sortedLegendEntries(entries) {
+  const items = Array.isArray(entries) ? entries.slice() : [];
+  items.sort((a, b) => {
+    const sa = routeSortMetaFromLegendEntry(a);
+    const sb = routeSortMetaFromLegendEntry(b);
+    if (sa.isNum && sb.isNum && sa.num !== sb.num) return sa.num - sb.num;
+    if (sa.isNum !== sb.isNum) return sa.isNum ? -1 : 1;
+    return sa.raw.localeCompare(sb.raw);
+  });
+  return items;
+}
+
 function routeSegmentKey(seg) {
   return seg?.overlap_route_id || `${seg?.route_id || ""}::${seg?.shape_id || ""}`;
 }
@@ -1341,13 +1365,13 @@ function downstreamStopSignatureForSegment(seg, routeStopMarkersBySegment) {
   if (!(routeStopMarkersBySegment instanceof Map)) return "";
   const markers = routeStopMarkersBySegment.get(routeSegmentKey(seg));
   if (!Array.isArray(markers) || markers.length === 0) return "";
-  const stopIds = [];
+  const stopIds = new Set();
   for (const marker of markers) {
     const stopId = String(marker?.stop_id || "").trim();
     if (!stopId) return "";
-    stopIds.push(stopId);
+    stopIds.add(stopId);
   }
-  return stopIds.join(">");
+  return Array.from(stopIds).sort().join("|");
 }
 
 function escapeRegExp(text) {
@@ -1378,25 +1402,100 @@ function legendLabelForSegment(seg, shortGroupCount) {
   return `${short} ${qualifier}`;
 }
 
+function segmentIdentityKeyForForcedMerge(seg) {
+  const short = String(seg?.route_short_name || "").trim().toLowerCase();
+  const display = String(seg?.display_name || "").trim().toLowerCase();
+  if (!short || !display) return "";
+  return `${short}::${display}`;
+}
+
+function mergeStopMarkersOrJoin(segments, routeStopMarkersBySegment) {
+  if (!(routeStopMarkersBySegment instanceof Map) || !Array.isArray(segments) || segments.length === 0) return [];
+  const seenStopIds = new Set();
+  const out = [];
+  for (const seg of segments) {
+    const markers = routeStopMarkersBySegment.get(routeSegmentKey(seg));
+    if (!Array.isArray(markers)) continue;
+    for (const marker of markers) {
+      const stopId = String(marker?.stop_id || "").trim();
+      if (!stopId || seenStopIds.has(stopId)) continue;
+      seenStopIds.add(stopId);
+      out.push(marker);
+    }
+  }
+  return out;
+}
+
 function buildSharedStopPatternRenderPlan(segments, routeStopMarkersBySegment) {
   const safeSegments = Array.isArray(segments) ? segments : [];
-  const groups = new Map();
-  const order = [];
+  const segmentMeta = safeSegments.map((seg) => ({
+    seg,
+    segKey: routeSegmentKey(seg),
+    stopSig: downstreamStopSignatureForSegment(seg, routeStopMarkersBySegment),
+    identityKey: segmentIdentityKeyForForcedMerge(seg),
+  }));
 
-  for (const seg of safeSegments) {
-    const stopSig = downstreamStopSignatureForSegment(seg, routeStopMarkersBySegment);
-    const key = stopSig ? `stopsig::${stopSig}` : `segment::${routeSegmentKey(seg)}`;
-    let group = groups.get(key);
-    if (!group) {
-      group = { key, stopSig, members: [] };
-      groups.set(key, group);
-      order.push(group);
+  const identityBuckets = new Map();
+  const stopSigBuckets = new Map();
+  for (const meta of segmentMeta) {
+    if (meta.identityKey) {
+      if (!identityBuckets.has(meta.identityKey)) identityBuckets.set(meta.identityKey, []);
+      identityBuckets.get(meta.identityKey).push(meta);
     }
-    group.members.push(seg);
+    if (meta.stopSig) {
+      if (!stopSigBuckets.has(meta.stopSig)) stopSigBuckets.set(meta.stopSig, []);
+      stopSigBuckets.get(meta.stopSig).push(meta);
+    }
+  }
+
+  const groups = [];
+  const visitedSegKeys = new Set();
+  for (const startMeta of segmentMeta) {
+    if (visitedSegKeys.has(startMeta.segKey)) continue;
+
+    const queue = [startMeta];
+    const componentMeta = [];
+    const seenIdentityKeys = new Set();
+    const seenStopSigs = new Set();
+
+    while (queue.length > 0) {
+      const cur = queue.pop();
+      if (!cur || visitedSegKeys.has(cur.segKey)) continue;
+      visitedSegKeys.add(cur.segKey);
+      componentMeta.push(cur);
+
+      if (cur.identityKey && !seenIdentityKeys.has(cur.identityKey)) {
+        seenIdentityKeys.add(cur.identityKey);
+        const identityPeers = identityBuckets.get(cur.identityKey) || [];
+        for (const peer of identityPeers) {
+          if (!visitedSegKeys.has(peer.segKey)) queue.push(peer);
+        }
+      }
+
+      if (cur.stopSig && !seenStopSigs.has(cur.stopSig)) {
+        seenStopSigs.add(cur.stopSig);
+        const stopSigPeers = stopSigBuckets.get(cur.stopSig) || [];
+        for (const peer of stopSigPeers) {
+          if (!visitedSegKeys.has(peer.segKey)) queue.push(peer);
+        }
+      }
+    }
+
+    const members = [];
+    const stopSigs = [];
+    for (const meta of componentMeta) {
+      members.push(meta.seg);
+      if (meta.stopSig) stopSigs.push(meta.stopSig);
+    }
+    const uniqueStopSigs = Array.from(new Set(stopSigs));
+    groups.push({
+      members,
+      stopSig: uniqueStopSigs.length === 1 ? uniqueStopSigs[0] : uniqueStopSigs.join(" OR "),
+    });
   }
 
   const shortGroupCount = new Map();
-  for (const group of order) {
+  for (const group of groups) {
     const groupShorts = new Set();
     for (const seg of group.members) {
       const short = String(seg?.route_short_name || "").trim();
@@ -1409,7 +1508,8 @@ function buildSharedStopPatternRenderPlan(segments, routeStopMarkersBySegment) {
 
   const drawSegments = [];
   const legendEntries = [];
-  for (const group of order) {
+  const mergedRouteStopMarkersBySegment = new Map();
+  for (const group of groups) {
     const members = group.members;
     if (members.length === 0) continue;
 
@@ -1418,15 +1518,26 @@ function buildSharedStopPatternRenderPlan(segments, routeStopMarkersBySegment) {
       for (const seg of members) seg.lineColor = groupColor;
     }
 
+    const representative = members[0];
+    const representativeKey = routeSegmentKey(representative);
+    const mergedMarkers = mergeStopMarkersOrJoin(members, routeStopMarkersBySegment);
+    if (mergedMarkers.length > 0) {
+      mergedRouteStopMarkersBySegment.set(representativeKey, mergedMarkers);
+    } else if (routeStopMarkersBySegment instanceof Map) {
+      const fallbackMarkers = routeStopMarkersBySegment.get(representativeKey);
+      if (Array.isArray(fallbackMarkers) && fallbackMarkers.length > 0) {
+        mergedRouteStopMarkersBySegment.set(representativeKey, fallbackMarkers);
+      }
+    }
+
     if (!(group.stopSig && members.length > 1)) {
-      const seg = members[0];
-      const label = legendLabelForSegment(seg, shortGroupCount);
-      drawSegments.push(seg);
+      const label = legendLabelForSegment(representative, shortGroupCount);
+      drawSegments.push(representative);
       legendEntries.push({
-        lineColor: seg.lineColor,
+        lineColor: representative.lineColor,
         display_name: label,
         route_short_name: label,
-        active_hours_text: seg.active_hours_text || "",
+        active_hours_text: representative.active_hours_text || "",
       });
       continue;
     }
@@ -1448,7 +1559,7 @@ function buildSharedStopPatternRenderPlan(segments, routeStopMarkersBySegment) {
       }
     }
 
-    drawSegments.push(members[0]);
+    drawSegments.push(representative);
     legendEntries.push({
       lineColor: groupColor,
       display_name: labels.join(" + "),
@@ -1457,7 +1568,11 @@ function buildSharedStopPatternRenderPlan(segments, routeStopMarkersBySegment) {
     });
   }
 
-  return { drawSegments, legendEntries };
+  return {
+    drawSegments,
+    legendEntries,
+    mergedRouteStopMarkersBySegment,
+  };
 }
 
 function parseCSVFromZip(zip, filename, { stepRow, complete } = {}) {
@@ -5340,9 +5455,17 @@ async function drawRoutePreviewOnCanvas(ctx, {
     };
   }
 
-  const { drawSegments, legendEntries } = buildSharedStopPatternRenderPlan(segments, routeStopMarkersBySegment);
+  const {
+    drawSegments,
+    legendEntries,
+    mergedRouteStopMarkersBySegment,
+  } = buildSharedStopPatternRenderPlan(segments, routeStopMarkersBySegment);
+  const markersBySegment = (mergedRouteStopMarkersBySegment instanceof Map && mergedRouteStopMarkersBySegment.size > 0)
+    ? mergedRouteStopMarkersBySegment
+    : routeStopMarkersBySegment;
+  const orderedLegendEntries = sortedLegendEntries(legendEntries);
   const pad = mapCfg.innerPad;
-  const legendH = signLegendHeight(legendEntries);
+  const legendH = signLegendHeight(orderedLegendEntries);
   const drawX = x + pad;
   const drawY = y + pad;
   const drawW = w - (pad * 2);
@@ -5411,10 +5534,10 @@ async function drawRoutePreviewOnCanvas(ctx, {
     if (samples.length >= 2) drawTransitionSamplesOnCanvas(ctx, seg.lineColor, samples);
   }
 
-  if (showStops && routeStopMarkersBySegment instanceof Map) {
+  if (showStops && markersBySegment instanceof Map) {
     for (const seg of drawSegments) {
       const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
-      const stopsForSeg = routeStopMarkersBySegment.get(segKey) || [];
+      const stopsForSeg = markersBySegment.get(segKey) || [];
       if (!stopsForSeg.length) continue;
 
       ctx.fillStyle = seg.lineColor;
@@ -5457,7 +5580,7 @@ async function drawRoutePreviewOnCanvas(ctx, {
   const legendFontBold = signCanvasFont(typeCfg.legendBold);
   const legendFontRegular = signCanvasFont(typeCfg.legendRegular);
   const legendMaxChars = legendCfg.maxInlineChars;
-  for (const seg of legendEntries.slice(0, legendCfg.maxItems)) {
+  for (const seg of orderedLegendEntries.slice(0, legendCfg.maxItems)) {
     const lines = buildLegendLinesForSegment(seg);
     const routeLabel = (seg.display_name || seg.route_short_name || "Route").toString().trim();
     const activeLabel = (seg.active_hours_text || "").toString().trim();
@@ -6069,8 +6192,16 @@ async function buildSignSvg({
     console.warn("Failed to load route stop markers for SVG export.", err);
     routeStopMarkersBySegment = null;
   }
-  const { drawSegments, legendEntries } = buildSharedStopPatternRenderPlan(routeSegments, routeStopMarkersBySegment);
-  const legendH = signLegendHeight(legendEntries);
+  const {
+    drawSegments,
+    legendEntries,
+    mergedRouteStopMarkersBySegment,
+  } = buildSharedStopPatternRenderPlan(routeSegments, routeStopMarkersBySegment);
+  const markersBySegment = (mergedRouteStopMarkersBySegment instanceof Map && mergedRouteStopMarkersBySegment.size > 0)
+    ? mergedRouteStopMarkersBySegment
+    : routeStopMarkersBySegment;
+  const orderedLegendEntries = sortedLegendEntries(legendEntries);
+  const legendH = signLegendHeight(orderedLegendEntries);
   const layout = getSignLayoutGeometry({ width: W, height: H, legendHeight: legendH });
   const bounds = getRouteBounds(stop, drawSegments);
   const sharedEdges = buildSharedEdges(drawSegments, stop);
@@ -6195,10 +6326,10 @@ async function buildSignSvg({
   }
 
   const routeStopsSvg = [];
-  if (showStops && routeStopMarkersBySegment instanceof Map) {
+  if (showStops && markersBySegment instanceof Map) {
     for (const seg of drawSegments) {
       const segKey = seg.overlap_route_id || `${seg.route_id}::${seg.shape_id}`;
-      const stopsForSeg = routeStopMarkersBySegment.get(segKey) || [];
+      const stopsForSeg = markersBySegment.get(segKey) || [];
       if (!stopsForSeg.length) continue;
       for (const s of stopsForSeg) {
         const pos = markerPixelPositionOnRouteLane(
@@ -6222,7 +6353,7 @@ async function buildSignSvg({
   const itemGap = legendCfg.itemGap;
   let legendY = layout.mapOuterY + layout.mapOuterHeight - legendH + legendCfg.startBaselineOffset;
   const legendMaxChars = legendCfg.maxInlineChars;
-  for (const seg of legendEntries.slice(0, legendCfg.maxItems)) {
+  for (const seg of orderedLegendEntries.slice(0, legendCfg.maxItems)) {
     const lines = buildLegendLinesForSegment(seg);
     const routeLabel = (seg.display_name || seg.route_short_name || "Route").toString().trim();
     const activeLabel = (seg.active_hours_text || "").toString().trim();
