@@ -181,3 +181,28 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
   }
   #copyBtn { display: none; }
 }
+
+@media (max-width: 400px) {
+  .modal__controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .modal__controls .toggleCheck {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .modal__controls .toggleCheck .btn {
+    display: block;
+    width: 100%;
+    text-align: center;
+  }
+
+  #downloadSvgBtn,
+  #downloadBtn {
+    width: 100%;
+  }
+}
