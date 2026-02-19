@@ -1013,6 +1013,12 @@ function deriveFeedUpdatedDateKey(feedInfoRows) {
 
 function contributionUrlForFooter() {
   try {
+    const override = String(window?.SIGN_FOOTER_CONTRIBUTION_URL || "").trim();
+    if (/^https?:\/\//i.test(override)) return override;
+  } catch {
+    // Ignore and continue.
+  }
+  try {
     const href = String(window?.location?.href || "").trim();
     if (/^https?:\/\//i.test(href)) return href;
   } catch {
@@ -1023,9 +1029,8 @@ function contributionUrlForFooter() {
 
 function signFooterText() {
   const contribution = `Contribute at ${contributionUrlForFooter()}`;
-  const base = "Created by Jared Tweed";
-  if (!feedUpdatedDateLabel) return `${base} • ${contribution}`;
-  return `${base} • Updated ${feedUpdatedDateLabel} • ${contribution}`;
+  if (!feedUpdatedDateLabel) return contribution;
+  return `Updated ${feedUpdatedDateLabel} • ${contribution}`;
 }
 
 function isCurrentFeedUpToDateWithDownloadLink() {

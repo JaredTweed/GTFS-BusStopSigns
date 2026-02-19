@@ -9,6 +9,7 @@ SETTLE_MS="${SETTLE_MS:-300}"
 MAX_RENDER_ATTEMPTS="${MAX_RENDER_ATTEMPTS:-8}"
 STABILIZE_PAUSE_MS="${STABILIZE_PAUSE_MS:-700}"
 BASE_URL_INPUT="${BASE_URL:-}"
+SIGN_FOOTER_URL="${SIGN_FOOTER_URL:-https://jaredtweed.github.io/BusStopSigns/}"
 
 require_cmd() {
   local cmd="$1"
@@ -34,6 +35,7 @@ Usage:
 
 Optional env vars:
   BASE_URL   Use an already-running app URL (skips local python server)
+  SIGN_FOOTER_URL  Footer contribution URL for generated examples (default: https://jaredtweed.github.io/BusStopSigns/)
   HOST       Local server host (default: 127.0.0.1)
   PORT       Local server port (default: 4173)
   EXAMPLES_DIR  Output folder (default: ./examples)
@@ -134,15 +136,16 @@ fi
 
 echo "Updating ${#STOP_CODES[@]} example PNG(s) from ${TARGET_URL}"
 
-node - "$TARGET_URL" "$EXAMPLES_DIR" "$SETTLE_MS" "$MAX_RENDER_ATTEMPTS" "$STABILIZE_PAUSE_MS" "${STOP_CODES[@]}" <<'NODE'
+node - "$TARGET_URL" "$EXAMPLES_DIR" "$SETTLE_MS" "$MAX_RENDER_ATTEMPTS" "$STABILIZE_PAUSE_MS" "$SIGN_FOOTER_URL" "${STOP_CODES[@]}" <<'NODE'
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { chromium } = require("playwright");
 
-const [, , targetUrl, examplesDir, settleMsRaw, maxRenderAttemptsRaw, stabilizePauseMsRaw, ...codes] = process.argv;
+const [, , targetUrl, examplesDir, settleMsRaw, maxRenderAttemptsRaw, stabilizePauseMsRaw, signFooterUrlRaw, ...codes] = process.argv;
 const settleMs = Math.max(0, Number(settleMsRaw) || 0);
 const maxRenderAttempts = Math.max(2, Number(maxRenderAttemptsRaw) || 2);
 const stabilizePauseMs = Math.max(0, Number(stabilizePauseMsRaw) || 0);
+const signFooterUrl = String(signFooterUrlRaw || "").trim();
 
 async function waitForAppReady(page) {
   await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
@@ -246,6 +249,11 @@ async function main() {
 
   try {
     await waitForAppReady(page);
+    if (signFooterUrl) {
+      await page.evaluate((url) => {
+        window.SIGN_FOOTER_CONTRIBUTION_URL = String(url || "");
+      }, signFooterUrl);
+    }
     for (const code of codes) {
       const result = await renderStopPng(page, code);
       if (!result.ok) {
