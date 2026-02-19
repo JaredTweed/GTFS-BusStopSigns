@@ -160,9 +160,9 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
   box-sizing: border-box;
   pointer-events: none;
 }
-.modal__body { padding: 12px 14px; overflow: auto; display:flex; flex: 1; min-height: 0; flex-direction: column; gap: 8px; }
-.signWrap { display:flex; justify-content:center; align-items: flex-start; flex: 0 0 auto; min-height: 0; overflow: visible; }
-#signCanvas { max-width: 100%; width: auto; height: auto; border: 1px solid #eee; border-radius: 12px; background:#fff; transform-origin: center center; will-change: transform; }
+.modal__body { padding: 12px 14px; overflow: auto; display:block; flex: 1; min-height: 0; }
+.signWrap { display:block; width: fit-content; max-width: 100%; margin: 0 auto; flex: 0 0 auto; min-height: 0; overflow: visible; padding: 0; }
+#signCanvas { display:block; max-width: 100%; width: auto; height: auto; border: 1px solid #eee; border-radius: 12px; background:#fff; transform-origin: center center; will-change: transform; }
 
 @media (max-width: 1250px) {
   .topProgress { display: block; }

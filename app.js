@@ -278,6 +278,8 @@ const MASS_SELECT_DRAG_MIN_PX = 8;
 let previewZoomScale = 1;
 let previewZoomOriginX = 50;
 let previewZoomOriginY = 50;
+let previewZoomBaseWidth = 0;
+let previewZoomBaseHeight = 0;
 let signVectorStylePromise = null;
 let signVectorMapHost = null;
 let signVectorMap = null;
@@ -310,8 +312,64 @@ function stopMarkerStyle() {
   return isCoarsePointerDevice() ? TOUCH_STOP_MARKER_STYLE : DEFAULT_STOP_MARKER_STYLE;
 }
 
+function resetPreviewZoomLayout() {
+  if (ui.signWrap) {
+    ui.signWrap.style.maxWidth = "";
+    ui.signWrap.style.paddingTop = "";
+    ui.signWrap.style.paddingRight = "";
+    ui.signWrap.style.paddingBottom = "";
+    ui.signWrap.style.paddingLeft = "";
+  }
+  if (ui.signCanvas) {
+    ui.signCanvas.style.maxWidth = "";
+    ui.signCanvas.style.width = "";
+    ui.signCanvas.style.height = "";
+    ui.signCanvas.style.transformOrigin = "center center";
+    ui.signCanvas.style.transform = "scale(1)";
+  }
+  previewZoomBaseWidth = 0;
+  previewZoomBaseHeight = 0;
+}
+
+function ensurePreviewZoomBaseSize() {
+  if (previewZoomBaseWidth > 0 && previewZoomBaseHeight > 0) return;
+  const rect = ui.signCanvas?.getBoundingClientRect();
+  const measuredWidth = rect?.width || ui.signCanvas?.clientWidth || ui.signCanvas?.width || 0;
+  const measuredHeight = rect?.height || ui.signCanvas?.clientHeight || ui.signCanvas?.height || 0;
+  if (measuredWidth > 0 && measuredHeight > 0) {
+    previewZoomBaseWidth = measuredWidth;
+    previewZoomBaseHeight = measuredHeight;
+  }
+}
+
 function applyPreviewZoom() {
-  if (!ui.signCanvas) return;
+  if (!ui.signCanvas || !ui.signWrap) return;
+  if (previewZoomScale <= (PREVIEW_ZOOM_MIN + 1e-4)) {
+    resetPreviewZoomLayout();
+    return;
+  }
+
+  ensurePreviewZoomBaseSize();
+  if (!(previewZoomBaseWidth > 0) || !(previewZoomBaseHeight > 0)) return;
+
+  const originX = Math.max(0, Math.min(100, previewZoomOriginX)) / 100;
+  const originY = Math.max(0, Math.min(100, previewZoomOriginY)) / 100;
+  const extraX = (previewZoomScale - 1) * previewZoomBaseWidth;
+  const extraY = (previewZoomScale - 1) * previewZoomBaseHeight;
+  const padLeft = extraX * originX;
+  const padRight = extraX * (1 - originX);
+  const padTop = extraY * originY;
+  const padBottom = extraY * (1 - originY);
+
+  ui.signWrap.style.maxWidth = "none";
+  ui.signWrap.style.paddingTop = `${padTop}px`;
+  ui.signWrap.style.paddingRight = `${padRight}px`;
+  ui.signWrap.style.paddingBottom = `${padBottom}px`;
+  ui.signWrap.style.paddingLeft = `${padLeft}px`;
+
+  ui.signCanvas.style.maxWidth = "none";
+  ui.signCanvas.style.width = `${previewZoomBaseWidth}px`;
+  ui.signCanvas.style.height = `${previewZoomBaseHeight}px`;
   ui.signCanvas.style.transformOrigin = `${previewZoomOriginX}% ${previewZoomOriginY}%`;
   ui.signCanvas.style.transform = `scale(${previewZoomScale})`;
 }
@@ -335,15 +393,31 @@ function onSignPreviewWheel(e) {
   if (!rect || rect.width <= 0 || rect.height <= 0) return;
   if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return;
   e.preventDefault();
+  const bodyRect = ui.modalBody?.getBoundingClientRect();
+  const pointerBodyX = bodyRect ? (e.clientX - bodyRect.left) : 0;
+  const pointerBodyY = bodyRect ? (e.clientY - bodyRect.top) : 0;
   const relX = (e.clientX - rect.left) / rect.width;
   const relY = (e.clientY - rect.top) / rect.height;
+  const prevScale = previewZoomScale;
+  const baseWidth = rect.width / prevScale;
+  const baseHeight = rect.height / prevScale;
   previewZoomOriginX = Math.max(0, Math.min(100, relX * 100));
   previewZoomOriginY = Math.max(0, Math.min(100, relY * 100));
   const zoomFactor = e.deltaY < 0 ? PREVIEW_ZOOM_STEP : (1 / PREVIEW_ZOOM_STEP);
-  const next = clampPreviewZoom(previewZoomScale * zoomFactor);
-  if (Math.abs(next - previewZoomScale) < 1e-4) return;
+  const next = clampPreviewZoom(prevScale * zoomFactor);
+  if (Math.abs(next - prevScale) < 1e-4) return;
   previewZoomScale = next;
   applyPreviewZoom();
+
+  if (!ui.modalBody || !bodyRect || !ui.signWrap) return;
+  if (!(baseWidth > 0) || !(baseHeight > 0)) return;
+  const wrapRect = ui.signWrap.getBoundingClientRect();
+  const wrapLeftInContent = ui.modalBody.scrollLeft + (wrapRect.left - bodyRect.left);
+  const wrapTopInContent = ui.modalBody.scrollTop + (wrapRect.top - bodyRect.top);
+  const targetX = wrapLeftInContent + (relX * baseWidth * next);
+  const targetY = wrapTopInContent + (relY * baseHeight * next);
+  ui.modalBody.scrollLeft = Math.max(0, targetX - pointerBodyX);
+  ui.modalBody.scrollTop = Math.max(0, targetY - pointerBodyY);
 }
 
 function getSignCanvasPointFromMouseEvent(ev) {
