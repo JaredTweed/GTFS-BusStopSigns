@@ -71,6 +71,15 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
   padding: 12px 14px; border-bottom: 1px solid #eee;
   display:flex; align-items:flex-end; gap: 12px; flex-wrap: wrap;
 }
+.modal__controls .toggleCheck {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.modal__controls .toggleCheck .btn {
+  display: block;
+  width: 100%;
+  text-align: center;
+}
 .modal__controls .btn {
   font-size: 13px;
   line-height: 1.2;
@@ -204,5 +213,12 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
   #downloadSvgBtn,
   #downloadBtn {
     width: 100%;
+  }
+}
+
+@media (min-width: 401px) {
+  .modal__controls {
+    flex-wrap: nowrap;
+    align-items: stretch;
   }
 }
