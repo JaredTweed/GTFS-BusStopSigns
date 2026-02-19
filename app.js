@@ -1053,7 +1053,8 @@ function isCurrentFeedUpToDateWithDownloadLink() {
 
 function setUpdatesUi({ showButton = false, showStatus = false, statusText = "GTFS Uploaded", buttonText = "Download Updated GTFS File", disableButton = false } = {}) {
   if (ui.reloadBtn) {
-    ui.reloadBtn.style.display = showButton ? "" : "none";
+    // Keep this action hidden; updates are handled by shipping an up-to-date bundled feed.
+    ui.reloadBtn.style.display = "none";
     ui.reloadBtn.textContent = buttonText;
     ui.reloadBtn.disabled = !!disableButton;
   }
@@ -6993,7 +6994,11 @@ async function boot({ zipUrl, zipFile, zipName }) {
   setMassSelectionMode(false);
   clearMassSelection();
   setMassDownloadStatus("Click “Select Region”, then drag over the map.");
-  setUpdatesUi({ showButton: false, showStatus: false });
+  setUpdatesUi({
+    showButton: false,
+    showStatus: !!zipFile,
+    statusText: zipFile ? "Uploading GTFS..." : "GTFS Uploaded",
+  });
 
   try {
     const zip = zipFile ? await loadZipFromFile(zipFile) : await loadZipFromUrl(zipUrl);
