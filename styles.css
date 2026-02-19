@@ -106,6 +106,21 @@ body, button, input, select, textarea, label, code, .leaflet-container, .leaflet
 .massDownload__controls { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .massDownload__format .input { width: 100%; box-sizing: border-box; }
 .massDownload__controls .btn { width: fit-content; }
+#massDownloadBtn:disabled {
+  background: #e5e7eb;
+  border-color: #d1d5db;
+  color: #6b7280;
+  cursor: not-allowed;
+  opacity: 1;
+  filter: none;
+}
+.massDownload--needsSelection #massSelectionCount {
+  color: #374151;
+  font-weight: 600;
+}
+.sideLinks__list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.sideLinks__list a { color: #2b6dff; text-decoration: none; font-weight: 600; }
+.sideLinks__list a:hover { text-decoration: underline; }
 #massSelectionOverlay {
   position: absolute;
   inset: 0;

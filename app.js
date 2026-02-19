@@ -610,21 +610,32 @@ function updateMassSelectionCountText() {
     ui.massSelectionCount.textContent = `${niceInt(massSelectedStops.length)} stop${massSelectedStops.length === 1 ? "" : "s"} selected.`;
     return;
   }
-  ui.massSelectionCount.textContent = "No region selected.";
+  ui.massSelectionCount.textContent = "No region selected. Select Region to enable download.";
 }
 
 function updateMassDownloadUi() {
   updateMassSelectionCountText();
   const canCancelMassDownload = !!activeMassDownloadCancelToken && exportJobInProgress;
   const cancelRequested = !!activeMassDownloadCancelToken?.canceled;
+  const massDownloadCard = document.querySelector(".massDownload");
   if (ui.massSelectRegionBtn) {
     ui.massSelectRegionBtn.disabled = exportJobInProgress;
     ui.massSelectRegionBtn.textContent = massSelectionMode ? "Selecting…" : "Select Region";
   }
   if (ui.massDownloadFormat) ui.massDownloadFormat.disabled = exportJobInProgress;
   if (ui.massDownloadBtn) {
-    ui.massDownloadBtn.disabled = exportJobInProgress || massSelectionMode || massSelectedStops.length === 0;
+    const disabledBecauseNoSelection = !exportJobInProgress && !massSelectionMode && massSelectedStops.length === 0;
+    ui.massDownloadBtn.disabled = exportJobInProgress || massSelectionMode || disabledBecauseNoSelection;
     ui.massDownloadBtn.hidden = canCancelMassDownload;
+    ui.massDownloadBtn.setAttribute("aria-disabled", ui.massDownloadBtn.disabled ? "true" : "false");
+    if (disabledBecauseNoSelection) {
+      ui.massDownloadBtn.title = "Select a region first";
+      ui.massDownloadBtn.textContent = "Download Region ZIP";
+    } else {
+      ui.massDownloadBtn.title = "";
+      ui.massDownloadBtn.textContent = "Download Region ZIP";
+    }
+    massDownloadCard?.classList.toggle("massDownload--needsSelection", disabledBecauseNoSelection);
   }
   if (ui.massCancelBtn) {
     ui.massCancelBtn.hidden = !canCancelMassDownload;
