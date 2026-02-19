@@ -245,6 +245,7 @@ const STOP_TIMES_WORKER_URL = "./stop_times_worker.js";
 const STOP_OVERLAY_WORKER_URL = "./stop_overlay_worker.js";
 const SHAPES_WORKER_URL = "./shapes_worker.js";
 const TRANSLINK_LATEST_GTFS_URL = "https://gtfs-static.translink.ca/gtfs/google_transit.zip";
+const CONTRIBUTION_URL_FALLBACK = "https://jaredtweed.github.io/GTFS-BusStopSigns/";
 const FIXED_DIRECTION_FILTER = "all";
 const FIXED_EXPORT_SCALE = 3;
 const QR_URL_MODE_TOGGLE_KEY = "KeyY";
@@ -1010,10 +1011,21 @@ function deriveFeedUpdatedDateKey(feedInfoRows) {
   return candidates.length ? candidates[0] : null;
 }
 
+function contributionUrlForFooter() {
+  try {
+    const href = String(window?.location?.href || "").trim();
+    if (/^https?:\/\//i.test(href)) return href;
+  } catch {
+    // Ignore and fall back.
+  }
+  return CONTRIBUTION_URL_FALLBACK;
+}
+
 function signFooterText() {
-  const base = "Generated from GTFS • Created by Jared Tweed";
-  if (!feedUpdatedDateLabel) return base;
-  return `${base} • Updated ${feedUpdatedDateLabel}`;
+  const contribution = `Contribute at ${contributionUrlForFooter()}`;
+  const base = "Created by Jared Tweed";
+  if (!feedUpdatedDateLabel) return `${base} • ${contribution}`;
+  return `${base} • Updated ${feedUpdatedDateLabel} • ${contribution}`;
 }
 
 function isCurrentFeedUpToDateWithDownloadLink() {
