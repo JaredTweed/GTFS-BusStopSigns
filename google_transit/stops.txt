@@ -1213,7 +1213,6 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 11841,61438,Westbound Westminster Hwy @ Kartner Rd,,49.169937,-123.035897,BUS ZN,,0,,1
 11843,60785,Northbound 188 St @ 68 Ave,,49.126646,-122.701633,BUS ZN,,0,,1
 11845,61675,Westbound E Royal Ave @ McBride Blvd,,49.212748,-122.898522,BUS ZN,,0,,1
-11846,61676,Eastbound E Royal Ave @ McBride Blvd,,49.212701,-122.898435,BUS ZN,,0,,1
 11847,61761,Southbound 202 St @ 8900 Block,,49.164206,-122.660614,BUS ZN,,0,,1
 11848,61727,Westbound Ewen Ave @ Derwent Way,,49.191588,-122.934168,BUS ZN,,0,,1
 1185,51176,Westbound Kingsway @ Wessex St,,49.233186,-123.033761,BUS ZN,,0,,1
@@ -1523,6 +1522,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 12242,61988,Inlet Centre Station @ Bay 2,,49.278102,-122.827095,BUS ZN,,0,,1
 12243,59570,Westbound Foster Ave @ Fairview St,,49.256781,-122.88358,BUS ZN,,0,,1
 12244,58189,Westbound Foster Ave @ Aspen St,,49.256811,-122.887308,BUS ZN,,0,,1
+12245,58186,Eastbound Foster Ave @ Aspen St,,49.256704,-122.886632,BUS ZN,,0,,2
 12246,59585,Eastbound Foster Ave @ Fairview St,,49.25667,-122.883377,BUS ZN,,0,,1
 12248,60039,Eastbound Sherling Ave @ Hawkins St,,49.253526,-122.737917,BUS ZN,,0,,1
 12249,60037,Northbound Fremont Connector @ Sherling Ave,,49.253669,-122.733641,BUS ZN,,0,,1
@@ -2702,6 +2702,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 1979,51962,Eastbound W 49 Ave @ Montgomery St,,49.226598,-123.131458,BUS ZN,,0,,1
 198,50198,Westbound W 41 Ave @ Granville St,,49.234391,-123.139167,BUS ZN,,0,,1
 1980,51963,Eastbound W 49 Ave @ Oak St,,49.22645,-123.12776,BUS ZN,,0,,1
+1985,51968,Eastbound W 49 Ave @ Alberta St,,49.225896,-123.112498,BUS ZN,,0,,1
 1987,51970,Eastbound E 49 Ave @ Quebec St,,49.225636,-123.103335,BUS ZN,,0,,1
 1988,51971,Eastbound E 49 Ave @ Main St,,49.225593,-123.101045,BUS ZN,,0,,1
 1989,51972,Eastbound E 49 Ave @ Prince Edward St,,49.225514,-123.097041,BUS ZN,,0,,1
@@ -2751,7 +2752,6 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 2044,52027,Westbound E 49 Ave @ Fraser St,,49.225535,-123.091289,BUS ZN,,0,,1
 2045,52028,Westbound E 49 Ave @ St. George St,,49.225593,-123.094471,BUS ZN,,0,,1
 2046,52029,Westbound E 49 Ave @ Prince Edward St,,49.22566,-123.098055,BUS ZN,,0,,1
-2050,52033,Westbound W 49 Ave @ Alberta St,,49.226074,-123.113387,BUS ZN,,0,,1
 2051,61218,Langara-49th Station @ Bay 2,,49.226178,-123.116035,BUS ZN,,0,,1
 2052,52035,Westbound W 49 Ave @ Tisdall St,,49.226392,-123.121435,BUS ZN,,0,,1
 2053,52036,Westbound W 49 Ave @ Laurel St,,49.226538,-123.125587,BUS ZN,,0,,1
@@ -2980,7 +2980,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 2376,52352,Eastbound Derwent Way @ Caldew St,,49.177665,-122.931007,BUS ZN,,0,,1
 2377,52353,Eastbound Derwent Way @ 600 Block,,49.180195,-122.92957,BUS ZN,,0,,1
 2378,52354,Northbound Boyd St @ Ewen Ave,,49.192086,-122.933723,BUS ZN,,0,,2
-2379,52355,Eastbound Duncan St @ 400 Block,,49.195134,-122.934695,BUS ZN,,0,,1
+2379,52355,Eastbound Duncan St @ Stanley St,,49.195134,-122.934695,BUS ZN,,0,,1
 238,50236,Southbound Main St @ E 5th Ave,,49.265849,-123.100989,BUS ZN,,0,,1
 2380,52356,Southbound Furness St @ Ewen Ave,,49.194614,-122.927269,BUS ZN,,0,,1
 2382,52358,Westbound Ewen Ave @ Fenton St,,49.190749,-122.936196,BUS ZN,,0,,1
@@ -4371,7 +4371,6 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 4107,54066,Westbound Mt Seymour Parkway @ Mt Seymour Rd,,49.316049,-122.969788,BUS ZN,,0,,1
 4108,54067,Westbound Mt Seymour Parkway @ Parkgate Ave,,49.315864,-122.975057,BUS ZN,,0,,1
 4109,54068,Westbound Mt Seymour Parkway @ Apex Ave,,49.315715,-122.980948,BUS ZN,,0,,1
-411,50407,Northbound Homer St @ W Pender St,,49.282981,-123.111441,BUS ZN,,0,,1
 4110,54069,Westbound Mt Seymour Parkway @ Strathaven Dr,,49.315765,-122.984288,BUS ZN,,0,,2
 4111,54070,Westbound Mt Seymour Parkway @ Northlands Dr,,49.315855,-122.989475,BUS ZN,,0,,1
 4112,54071,Westbound Mt Seymour Parkway @ Broadview Dr,,49.315929,-122.997058,BUS ZN,,0,,2
@@ -4724,6 +4723,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 4534,54482,Eastbound Ridgewood Dr @ Norcross Way,,49.339449,-123.112906,BUS ZN,,0,,1
 4535,54483,Eastbound Ridgewood Dr @ Bluebonnet Dr,,49.339108,-123.109705,BUS ZN,,0,,1
 4536,54484,Eastbound Ridgewood Dr @ Brookridge Dr,,49.339324,-123.106151,BUS ZN,,0,,1
+4537,54485,Northbound Highland Blvd @ Woodbine Dr,,49.338241,-123.100533,BUS ZN,,0,,1
 4538,54486,Northbound Highland Blvd @ Belmont Ave,,49.340339,-123.09818,BUS ZN,,0,,2
 4539,54487,Northbound Highland Blvd @ Glenora Ave,,49.341684,-123.097067,BUS ZN,,0,,2
 4540,54488,Northbound Highland Blvd @ Melbourne Ave,,49.34295,-123.096047,BUS ZN,,0,,2
@@ -6838,7 +6838,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 6918,56853,Westbound Williams Rd @ Seacote Rd,,49.140761,-123.098456,BUS ZN,,0,,1
 6919,56854,Westbound Williams Rd @ Shell Rd,,49.14077,-123.103604,BUS ZN,,0,,1
 692,50685,Southbound Nanaimo St @ E 17 Ave,,49.254756,-123.056762,BUS ZN,,0,,1
-6920,56855,Westbound Williams Rd @ Aragon Rd,,49.140789,-123.108306,BUS ZN,,0,,2
+6920,56855,Westbound Williams Rd @ Aragon Rd,,49.140789,-123.108306,BUS ZN,,0,,1
 6921,56856,Westbound Williams Rd @ No. 4 Rd,,49.140808,-123.11456,BUS ZN,,0,,1
 6922,56857,Westbound Williams Rd @ Ash St,,49.140866,-123.120344,BUS ZN,,0,,2
 6923,56858,Northbound Garden City Rd @ Williams Rd,,49.141326,-123.125165,BUS ZN,,0,,1
@@ -7676,6 +7676,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 7897,57823,Southbound 203 St @ 122 Ave,,49.22474,-122.656886,BUS ZN,,0,,1
 7898,57824,Southbound 203 St @ 121 Ave,,49.22324,-122.656772,BUS ZN,,0,,1
 7899,57825,Eastbound Dewdney Trunk Rd @ 256 St,,49.220389,-122.513413,BUS ZN,,0,,1
+79,50079,Eastbound W Pender St @ Richards St,,49.283143,-123.112655,BUS ZN,,0,,1
 790,50783,Southbound Fraser St @ E 27 Ave,,49.246305,-123.090308,BUS ZN,,0,,1
 7900,57826,(Eastbound Dewdney Trunk Rd In 25900-Block Area) (Flag),,49.220301,-122.503578,BUS ZN,,0,,2
 7901,59593,Eastbound Dewdney Trunk Rd @ 26300 Block,,49.220176,-122.49314,BUS ZN,,0,,2
@@ -8046,7 +8047,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 8653,60909,Northbound 15 St @ Ottawa Ave,,49.340258,-123.156826,BUS ZN,,0,,2
 8654,58223,Eastbound 88 Ave @ 156 St,,49.162722,-122.791163,BUS ZN,,0,,2
 8655,58147,Northbound Willard St @ Marine Dr,,49.204534,-122.9709,BUS ZN,,0,,2
-8657,58439,Lougheed Station @ Bay 5,,49.247378,-122.894518,BUS ZN,,0,,1
+8656,58435,Lougheed Station @ Bay 1,,49.247845,-122.895376,BUS ZN,,0,,1
 8659,58441,Sperling Station @ Bay 4,,49.258603,-122.963986,BUS ZN,,0,,1
 866,50859,Southbound Granville St @ W 57 Ave,,49.218967,-123.140294,BUS ZN,,0,,1
 8661,60935,Westbound Eyremount Dr @ 700 Block,,49.345218,-123.139214,BUS ZN,,0,,2
