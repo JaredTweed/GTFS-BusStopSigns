@@ -1,6 +1,6 @@
 ## Description
 
-View the website here: https://jaredtweed.github.io/GTFS-BusStopSigns/
+View the website here: https://jaredtweed.github.io/BusStopSigns/
 
 This website generates high quality bus stop signs from GTFS zip files. By default, it uses the GTFS file for Vancouver, BC's Translink which can be found [here](https://www.translink.ca/about-us/doing-business-with-translink/app-developer-resources/gtfs/gtfs-data). 
 
