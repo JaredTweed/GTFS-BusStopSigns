@@ -176,7 +176,6 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 10297,59654,Southbound Laity St @ 12100 Block,,49.223199,-122.631885,BUS ZN,,0,,2
 10299,59656,Southbound Laity St @ Cook Ave,,49.218665,-122.631956,BUS ZN,,0,,1
 103,50103,Westbound Cornwall Ave @ Arbutus St,,49.272608,-123.152989,BUS ZN,,0,,1
-1030,51021,Northbound West Blvd @ W 43 Ave,,49.232961,-123.155537,BUS ZN,,0,,1
 10300,59659,Southbound Laity St @ Cutler Place,,49.216218,-122.631989,BUS ZN,,0,,1
 10305,59660,Northbound Laity St @ 117 Ave,,49.215285,-122.631858,BUS ZN,,0,,1
 10306,59706,Southbound 224 St @ 124 Ave,,49.227258,-122.601426,BUS ZN,,0,,1
@@ -492,7 +491,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 1084,51075,Northbound Nootka St @ E 26 Ave,,49.247362,-123.041531,BUS ZN,,0,,1
 10841,61006,Southbound Ravine Dr @ Wildwood Dr East,,49.29406,-122.828689,BUS ZN,,0,,1
 10849,58012,(Westbound Adams Rd In Cowan Rd Area) (Flag),,49.363354,-123.382981,BUS ZN,,0,,2
-1085,51076,Northbound Boyd Diversion @ Nootka St,,49.249584,-123.042078,BUS ZN,,0,,2
+1085,51076,Northbound Boyd Diversion @ Nootka St,,49.249584,-123.042078,BUS ZN,,0,,1
 10851,58767,(Northbound Mt Gardner Rd In Killarney Lake Area) (Flag),,49.389048,-123.356496,BUS ZN,,0,,2
 10852,57873,(Westbound Dewdney Trunk Rd In 26400-Block Area) (Flag),,49.220209,-122.489886,BUS ZN,,0,,2
 10853,60996,Northbound Cambie St @ W 45 Ave,,49.230066,-123.116096,BUS ZN,,0,,1
@@ -2176,7 +2175,8 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 13131,62068,Eastbound 24 Ave @ 182 St,,49.045593,-122.7179,BUS ZN,,0,,1
 13132,50239,Southbound Main St @ E 10 Ave,,49.261727,-123.10122,BUS ZN,,0,,1
 13133,62133,Westbound Fraser Hwy @ 184 St,,49.128577,-122.711881,BUS ZN,,0,,1
-13135,60558,Westbound W 41 Ave @ Blenheim St,,49.234839,-123.17834,BUS ZN,,0,,1
+13135,60558,Westbound W 41 Ave @ Blenheim St,,49.234843,-123.178062,BUS ZN,,0,,1
+13138,62042,Northbound West Blvd @ W 42 Ave,,49.233431,-123.155538,BUS ZN,,0,,2
 1314,51303,Southbound Knight St @ E 37 Ave,,49.236514,-123.07705,BUS ZN,,0,,1
 1315,51304,Southbound Knight St @ E 39 Ave,,49.234472,-123.077104,BUS ZN,,0,,2
 1316,51305,Southbound Knight St @ E 41 Ave,,49.232305,-123.077224,BUS ZN,,0,,1
@@ -2805,7 +2805,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 2130,52110,Eastbound Miller Rd @ 5500 Block,,49.192115,-123.163902,BUS ZN,,0,,1
 2131,52111,Eastbound Miller Rd @ Jericho Rd,,49.192059,-123.159488,BUS ZN,,0,,1
 2132,52112,Eastbound Miller Rd @ Aurora Connector,,49.192036,-123.156137,BUS ZN,,0,,2
-2133,52113,Eastbound Miller Rd @ Aylmer Rd,,49.192064,-123.153009,BUS ZN,,0,,2
+2133,52113,Eastbound Miller Rd @ Aylmer Rd,,49.192064,-123.153009,BUS ZN,,0,,1
 2134,52114,Eastbound Miller Rd @ Templeton St,,49.192044,-123.148208,BUS ZN,,0,,1
 2135,52115,Eastbound Miller Rd @ 7000 Block,,49.192028,-123.145729,BUS ZN,,0,,1
 2137,52117,Northbound Granville St @ W 71 Ave,,49.206713,-123.140464,BUS ZN,,0,,1
@@ -3508,7 +3508,6 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 3015,52984,Westbound Eton St @ N Carleton Ave,,49.287419,-123.011609,BUS ZN,,0,,2
 3016,52985,Westbound Eton St @ N Gilmore Ave,,49.287444,-123.014389,BUS ZN,,0,,2
 3017,52986,Westbound Eton St @ N MacDonald Ave,,49.287464,-123.016452,BUS ZN,,0,,1
-3019,52988,Southbound N Boundary Rd @ Eton St,,49.287261,-123.02361,BUS ZN,,0,,2
 302,50299,Northbound Dunbar St @ W 39 Ave,,49.236747,-123.185216,BUS ZN,,0,,1
 3020,52989,Southbound N Boundary Rd @ Cambridge St,,49.286231,-123.023627,BUS ZN,,0,,1
 3021,52990,Southbound Boundary Rd @ Dundas St,,49.284524,-123.023659,BUS ZN,,0,,1
@@ -3663,7 +3662,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 3198,53164,Eastbound Guildford Way @ Johnson St,,49.285094,-122.80093,BUS ZN,,0,,1
 3199,53165,Eastbound Guildford Way @ Pacific St,,49.285107,-122.797418,BUS ZN,,0,,1
 320,60725,Eastbound W Broadway @ Collingwood St,,49.264225,-123.181429,BUS ZN,,0,,1
-3202,53168,Southbound Pinetree Way @ Glen Dr,,49.282274,-122.793385,BUS ZN,,0,,1
+3202,53168,Southbound Pinetree Way @ Glen Dr,,49.282089,-122.793409,BUS ZN,,0,,1
 3204,53170,Coquitlam Central Station @ Bay 7,,49.274922,-122.799039,BUS ZN,,0,,1
 3206,53172,Westbound Barnet Hwy @ Falcon Dr,,49.278022,-122.819531,BUS ZN,,0,,2
 3207,53173,Westbound Barnet Hwy @ Ioco Rd,,49.277716,-122.825618,BUS ZN,,0,,2
@@ -5755,6 +5754,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 5709,55654,Northbound 132 St @ 78A Ave,,49.14559,-122.856673,BUS ZN,,0,,1
 571,50566,Westbound W Broadway @ Balaclava St,,49.264241,-123.174408,BUS ZN,,0,,1
 5710,55655,Northbound 132 St @ 80 Ave,,49.148507,-122.856704,BUS ZN,,0,,1
+5712,55657,Northbound 132 St @ 82A Ave,,49.152928,-122.856727,BUS ZN,,0,,2
 5713,55658,Northbound 132 St @ 84 Ave,,49.155731,-122.856726,BUS ZN,,0,,2
 5714,55659,Northbound 132 St @ Shakespeare Place,,49.160706,-122.856787,BUS ZN,,0,,1
 5715,55660,Northbound 132 St @ 88 Ave,,49.163009,-122.856776,BUS ZN,,0,,1
@@ -7988,7 +7988,7 @@ stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,locatio
 8537,50970,Southbound Victoria Dr @ E 22 Ave,,49.249893,-123.065127,BUS ZN,,0,,1
 8542,58238,Northbound 116 St @ Nordel Way,,49.162091,-122.90202,BUS ZN,,0,,1
 8546,51930,Eastbound Chancellor Blvd @ Hamber Rd,,49.272894,-123.237649,BUS ZN,,0,,1
-855,50848,Westbound E Broadway @ St. George St,,49.262598,-123.093535,BUS ZN,,0,,1
+855,50848,Westbound E Broadway @ St. George St,,49.262614,-123.093971,BUS ZN,,0,,1
 8552,58082,Braid Station @ Bay 2,,49.23303,-122.88308,BUS ZN,,0,,1
 8558,58091,Southbound 128 St @ 103 Ave,,49.18953,-122.867817,BUS ZN,,0,,1
 856,50849,Westbound E Broadway @ Prince Edward St,,49.262835,-123.096513,BUS ZN,,0,,1
